@@ -2,11 +2,18 @@
 
 # Script pour télécharger des livres de test depuis Project Gutenberg
 
+# charger .env si présent
+if [ -f ".env" ]; then
+    source .env
+else 
+    echo "Le fichier .env est manquant"
+fi
+
 # 1. Définir le dossier de destination
-TARGET_DIR="books"
+BOOKS_DIR="${SPLITS_TARGET_DIR}/books"
 
 # 2. S'assurer que le dossier existe
-mkdir -p $TARGET_DIR
+mkdir -p $BOOKS_DIR
 
 # 3. Définir les livres à télécharger (URL et Nom de Fichier)
 # Format: "URL_SOURCE  NOM_DU_FICHIER.txt"
@@ -18,7 +25,10 @@ BOOKS=(
     "https://www.gutenberg.org/ebooks/11.txt.utf-8 alice_in_wonderland.txt"
 )
 
-echo "Démarrage du téléchargement de ${#BOOKS[@]} livres dans le dossier '$TARGET_DIR'..."
+# créer le répertoire cible s'il n'existe pas
+mkdir -p "$BOOKS_DIR"
+
+echo "Démarrage du téléchargement de ${#BOOKS[@]} livres dans le dossier '$BOOKS_DIR'..."
 
 # 4. Boucler sur la liste et télécharger chaque livre
 for book_info in "${BOOKS[@]}"; do
@@ -30,7 +40,7 @@ for book_info in "${BOOKS[@]}"; do
     # Utilise wget:
     # -q : Mode "quiet" (silencieux), pour ne pas polluer le log
     # -O : Spécifie le fichier de sortie (Output)
-    wget -q -O "$TARGET_DIR/$filename" "$url"
+    wget -q -O "$BOOKS_DIR/$filename" "$url"
     
     # Vérifie si la commande précédente (wget) a réussi
     if [ $? -eq 0 ]; then
@@ -40,4 +50,4 @@ for book_info in "${BOOKS[@]}"; do
     fi
 done
 
-echo "Téléchargement complet. Les fichiers sont dans '$TARGET_DIR/'."
+echo "Téléchargement complet. Les fichiers sont dans '$BOOKS_DIR/'."

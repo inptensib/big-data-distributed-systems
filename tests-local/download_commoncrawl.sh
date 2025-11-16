@@ -1,8 +1,15 @@
 #!/bin/bash
 
+# charger .env si présent
+if [ -f ".env" ]; then
+    source .env
+else 
+    echo "Le fichier .env est manquant"
+fi
+
 # Path to the file containing the list of gzipped files
 file_list="wet.paths"
-INPUT_DIRECTORY_COMMONCRAWL="./commoncrawl"
+SPLITS_DIRECTORY_COMMONCRAWL="${SPLITS_TARGET_DIR}/commoncrawl"
 
 # Maximum number of iterations
 max_iterations=6
@@ -11,7 +18,7 @@ max_iterations=6
 iteration=0
 
 # create directory if it does not exist
-mkdir -p "${INPUT_DIRECTORY_COMMONCRAWL}"
+mkdir -p "${SPLITS_DIRECTORY_COMMONCRAWL}"
 
 # Loop through each line in the file
 while IFS= read -r line; do
@@ -35,7 +42,7 @@ while IFS= read -r line; do
         echo "Decompressing file: $filename"
 
         # Decompress the file 
-        gzip -dc "$filename" > "${INPUT_DIRECTORY_COMMONCRAWL}"/"${filename%.gz}"
+        gzip -dc "$filename" > "${SPLITS_DIRECTORY_COMMONCRAWL}"/"${filename%.gz}"
 
         echo "Removing downloaded file: $filename"
 
