@@ -146,16 +146,23 @@ show_amdal_results() {
 if [ "$1" == "deploy" ]; then
     deploy
 elif [ "$1" == "start" ]; then
-    if [ -z "$2" ]; then
-        echo "Usage: $0 start <number_of_splits>"
+    if [ -z "$2" ] || [ -z "$3" ]; then
+        echo "Usage: $0 start <number_of_splits> <number_of_workers>"
         exit 1
     fi
     SPLIT_LIMIT="$2"
+    NUM_WORKERS="$3"
     stop
     start
 elif [ "$1" == "stop" ]; then
     stop
 elif [ "$1" == "full" ]; then
+    if [ -z "$2" ] || [ -z "$3" ]; then
+        echo "Usage: $0 start <number_of_splits> <number_of_workers>"
+        exit 1
+    fi
+    SPLIT_LIMIT="$2"
+    NUM_WORKERS="$3"
     stop
     deploy
     start
@@ -177,7 +184,7 @@ else
     echo "  deploy                 : Déployer les fichiers Python dans le workspace local"
     echo "  start  <number_of_splits> : Démarrer le Master et les Workers locaux"
     echo "  stop                   : Arrêter le Master et les Workers locaux"
-    echo "  full                   : Arrêter, déployer , démarrer à nouveau et affichers les logs"
+    echo "  full  <number_of_splits>                 : Arrêter, déployer , démarrer à nouveau et affichers les logs"
     echo "  logs                   : Afficher les logs du Master et des Workers en direct"
     echo "  clean-amdal-results    : Supprimer le fichier des résultats Amdahl"
     echo "  results                : Afficher le contenu du fichier des résultats Amdahl"
