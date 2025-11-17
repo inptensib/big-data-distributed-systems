@@ -61,7 +61,7 @@ start() {
     
     # Démarrer le Master (il attend maintenant $NUM_WORKERS)
     echo "  -> Démarrage du Master sur $MASTER_HOST:$MASTER_PORT (attend $NUM_WORKERS workers)..."
-    nohup python3 ${TEST_WORKSPACE}/ybt_master_map_reduce.py \
+    nohup python3 ${TEST_WORKSPACE}/$MASTER_SCRIPT \
         --port $MASTER_PORT \
         --workers $NUM_WORKERS \
         --splits-dir $SPLITS_DIR \
@@ -78,13 +78,13 @@ start() {
 
     for i in $(seq 0 $((NUM_WORKERS - 1))); do
         echo "    -> Lancement worker (shuffle sur $((WORKERS_INITIAL_PORT + i + 1)))..."
-        nohup python3 ${TEST_WORKSPACE}/ybt_worker_map_reduce.py \
+        nohup python3 ${TEST_WORKSPACE}/$WORKER_SCRIPT \
             --master-host $MASTER_HOST \
             --master-port $MASTER_PORT \
             --shuffle-port $((WORKERS_INITIAL_PORT + i + 1)) \
             --shuffle-mode $SHUFFLE_MODE \
             --batch-size $SHUFFLE_BATCH_SIZE \
-            --result-output ${TEST_WORKSPACE}/${JOB_ID}/output \
+            --output-dir ${TEST_WORKSPACE}/${JOB_ID}/output \
                 > ${TEST_WORKSPACE}/${JOB_ID}/logs/worker_$((WORKERS_INITIAL_PORT + i + 1)).log 2>&1 &
         echo "       Worker PID: $!"
         sleep 1 # Délai pour laisser les processus démarrer proprement
@@ -98,8 +98,8 @@ start() {
 stop() {
     echo "--- Arrêt des services  ---"
     # pkill -f trouvera et tuera TOUS les processus master.py et worker.py
-    pkill -f "python3 ${TEST_WORKSPACE}/ybt_master_map_reduce.py" || true
-    pkill -f "python3 ${TEST_WORKSPACE}/ybt_worker_map_reduce.py" || true
+    pkill -f "python3 ${TEST_WORKSPACE}/$MASTER_SCRIPT" || true
+    pkill -f "python3 ${TEST_WORKSPACE}/$WORKER_SCRIPT" || true
     echo "Processus arrêtés."
 }
 
@@ -108,7 +108,7 @@ stop_worker_on_port() {
     echo "--- Arrêt du Worker sur le port $target_port ---"
     
     # Trouver le PID du processus qui utilise ce port en argument
-    PID=$(ps aux | grep ${TEST_WORKSPACE}/ybt_worker_map_reduce.py | grep "shuffle-port $target_port" | grep -v grep | awk '{print $2}')
+    PID=$(ps aux | grep ${TEST_WORKSPACE}/$WORKER_SCRIPT | grep "shuffle-port $target_port" | grep -v grep | awk '{print $2}')
     
     if [ -n "$PID" ]; then
         echo "PID trouvé: $PID"
