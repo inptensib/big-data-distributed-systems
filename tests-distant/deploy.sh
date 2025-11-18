@@ -368,6 +368,120 @@ show_amdal_results() {
     echo "--- Affichage des résultats Amdahl ($AMDAL_RESULT_FILE_PATH) ---"
     ssh $NFS_MACHINE "cat $AMDAL_RESULT_FILE_PATH" || echo "Aucun fichier $AMDAL_RESULT_FILE_PATH trouvé."
 }
+
+# ▼▼▼ NOUVELLE FONCTION : Test Amdahl avec pas adaptatif ▼▼▼
+lauch_amdal_analysis() {
+    local max_splits=$1
+    local max_workers=$2
+    # Déterminer le pas adaptatif
+    local STEP=$((max_workers / 10))
+    local START=5
+    if [ $STEP -lt 1 ]; then
+        STEP=1
+    fi
+    get_stored_master_nfs_server
+    clean_amdal_results
+    
+    echo "=============================================="
+    echo "  ANALYSE AMDAHL - Cluster Distant"
+    echo "  Splits: $max_splits"
+    echo "  Workers: $START à $max_workers"
+    echo "=============================================="
+    
+    
+    
+    echo "  Pas d'incrémentation : $STEP"
+    echo "  Points de mesure : $(seq $START $STEP $max_workers | wc -l)"
+    echo ""
+    
+    # Boucle de tests
+    for num_workers in $(seq $START $STEP $max_workers); do
+        echo ""
+        echo "══════════════════════════════════════════"
+        echo "  TEST $num_workers/$max_workers workers"
+        echo "  Job ID: $(date +%Y%m%d_%H%M%S)"
+        echo "══════════════════════════════════════════"
+        
+        # Récupérer la liste de workers
+        echo "  -> Récupération de $num_workers workers..."
+        NUM_WORKERS_TO_LAUNCH=$num_workers
+        get_master_and_workers_list
+        
+        # Déployer si premier test
+        if [ $num_workers -eq 1 ]; then
+            echo "  -> Déploiement du code..."
+            deploy
+        fi
+        
+        # Arrêter les services précédents
+        stop 2>/dev/null || true
+        sleep 3
+        
+        # Lancer le test
+        echo "  -> Démarrage du test..."
+        SPLIT_LIMIT=$max_splits
+        start
+        
+        # Attendre la fin du job
+        echo "  -> Attente de la fin du job..."
+        local timeout=3600  # 1h max par test
+        local elapsed=0
+        local last_log=0
+        
+        while true; do
+            # Vérifier si le job est terminé
+            if ssh $MASTER_HOST "grep  'RÉSUMÉ FINAL DU JOB (SUCCÈS)' /tmp/YBT_${JOB_ID}/logs/master.log 2>/dev/null"; then
+                echo "  Job terminé avec $num_workers workers"
+                break
+            fi
+            
+            sleep 10
+            elapsed=$((elapsed + 10))
+            
+            # Log de progression toutes les 10 minutes
+            if [ $((elapsed - last_log)) -ge 600 ]; then
+                echo "  Attente... ${elapsed}s écoulées ($num_workers workers)"
+                last_log=$elapsed
+            fi
+            
+            if [ $elapsed -ge $timeout ]; then
+                echo "  Timeout après ${timeout}s"
+                stop
+                break
+            fi
+        done
+        
+        # Pause entre les tests
+        echo "  -> Pause de 10s avant le prochain test..."
+        sleep 10
+    done
+    echo ""
+    echo "══════════════════════════════════════════"
+    echo "  ANALYSE AMDAHL TERMINÉE"
+    echo "══════════════════════════════════════════"
+}
+# ▲▲▲
+
+
+
+# ▼▼▼ NOUVELLE FONCTION : Test Amdahl dataset fixe ▼▼▼
+lauch_amdal_analysis_fixed() {
+    local num_splits=$1
+    local max_workers=$2
+    
+    echo "=============================================="
+    echo "  ANALYSE AMDAHL - Dataset fixe"
+    echo "  Splits: $num_splits (fixe)"
+    echo "  Workers: 5 à $max_workers"
+    echo "=============================================="
+    
+    # Utiliser la même logique que lauch_amdal_analysis
+    # mais avec num_splits constant
+    lauch_amdal_analysis $num_splits $max_workers
+}
+# ▲▲▲
+
+# ▼▼▼ 2. Préparation de l'Environnement ▼▼▼
 prepare_environment() {
     mkdir -p "$TEST_WORKSPACE"
 }
@@ -462,6 +576,14 @@ case "$1" in
         get_stored_workers_list
         collect_outputs
         ;;
+    launch-amdal-analysis-fixed-dataset)
+        if [ -z "$2" ] || [ -z "$3" ]; then
+            echo "Usage: $0 launch-amdal-analysis-fixed-dataset <num_splits> <max_workers>"
+            exit 1
+        fi
+        lauch_amdal_analysis_fixed "$2" "$3"
+        show_amdal_results
+        ;;
     *)
         echo "Usage: $0 [deploy|start|stop|full|full-rate-limit|clean-amdal-results|clean-reduce-outputs|clean-job|logs|logs-worker|collect-logs|results|retrieve-master-nfs-server-and-workers|stop-worker-on-host|collect-outputs]"
         echo ""
@@ -481,6 +603,7 @@ case "$1" in
         echo "  retrieve-master-nfs-server-and-workers <number>                - Récupère et stocke la liste des workers"
         echo "  stop-worker-on-host <worker_host>        - Arrête le worker sur l'hôte spécifié"
         echo "  collect-outputs                          - Récupère tous les outputs des workers"
+        echo "  launch-amdal-analysis-fixed-dataset <num_splits> <max_workers> - Lance une analyse Amdahl sur un dataset fixe"
         exit 1
         ;;
 esac

@@ -141,6 +141,102 @@ show_amdal_results() {
         echo "Le fichier $AMDAL_RESULT_FILE_PATH n'existe pas."
     fi
 }
+# ▼▼▼ NOUVELLE FONCTION : Test Amdahl sur dataset fixe ▼▼▼
+launch_amdal_analysis_fixed_dataset() {
+    num_splits=$1  
+    max_workers=$2
+    
+    clean_amdal_results
+    
+    echo "=============================================="
+    echo "  ANALYSE AMDAHL - Dataset fixe: $num_splits splits"
+    echo "  Workers: 1 à $max_workers"
+    echo "=============================================="
+    
+    # Déterminer le pas
+    if [ $max_workers -le 10 ]; then
+        STEP=1
+    elif [ $max_workers -le 20 ]; then
+        STEP=2
+    elif [ $max_workers -le 50 ]; then
+        STEP=5
+    else
+        STEP=10
+    fi
+    
+    # Points de mesure : 1, puis par pas, puis max
+    WORKER_COUNTS=(1)
+    for i in $(seq $STEP $STEP $max_workers); do
+        WORKER_COUNTS+=($i)
+    done
+    
+    # Ajouter max_workers s'il n'est pas déjà présent
+    if [ ${WORKER_COUNTS[-1]} -ne $max_workers ]; then
+        WORKER_COUNTS+=($max_workers)
+    fi
+    
+    echo "  Points de mesure : ${WORKER_COUNTS[@]}"
+    echo "  Nombre de tests : ${#WORKER_COUNTS[@]}"
+    echo "  Dataset : $num_splits splits (~$((num_splits * 300 / 1024)) Go)"
+    echo ""
+    
+    for workers in "${WORKER_COUNTS[@]}"; do
+        echo ""
+        echo "══════════════════════════════════════════"
+        echo "  TEST $workers/$max_workers workers"
+        echo "  Dataset : $num_splits splits"
+        echo "══════════════════════════════════════════"
+        
+        stop
+        SPLIT_LIMIT=$num_splits
+        NUM_WORKERS=$workers
+        start
+        
+        # Attendre la fin du job
+        echo "  Attente de la fin du job..."
+        timeout=300  # 5 minutes max par job (ajustable)
+        elapsed=0
+        last_log=0
+        
+        while true; do  
+            if grep -q "REDUCE terminé\|Phase REDUCE1 terminée\|FINISHED" "${TEST_WORKSPACE}/${JOB_ID}/logs/master.log" 2>/dev/null; then
+                echo "  ✅ Job terminé avec $workers workers"
+                
+                # Extraire le temps d'exécution
+                exec_time=$(grep "Temps d'exécution total" "${TEST_WORKSPACE}/${JOB_ID}/logs/master.log" | tail -1 | grep -oP '\d+\.\d+ secondes' | grep -oP '\d+\.\d+')
+                if [ -n "$exec_time" ]; then
+                    echo "  ⏱️  Temps d'exécution : ${exec_time}s"
+                fi
+                break
+            fi
+            
+            sleep 5
+            elapsed=$((elapsed + 5))
+            
+            # Log de progression toutes les 5 minutes
+            if [ $((elapsed - last_log)) -ge 300 ]; then
+                echo "  ⏳ Attente... ${elapsed}s écoulées (${workers} workers)"
+                last_log=$elapsed
+            fi
+            
+            if [ $elapsed -ge $timeout ]; then
+                echo "  ⚠️  Timeout après ${timeout}s"
+                break
+            fi
+        done
+        
+        sleep 5  # Pause entre les tests
+    done
+
+    echo ""
+    echo "══════════════════════════════════════════"
+    echo "  Génération du rapport Amdahl"
+    echo "══════════════════════════════════════════"
+    python3 ${CODE_PYTHON_DIR}/amdal_analysis.py --input-file $AMDAL_RESULT_FILE_PATH
+}
+# ▲▲▲
+
+# --- 2. Préparation de l'Environnement ---
 prepare_environment() {
     mkdir -p "$TEST_WORKSPACE"
 }
@@ -182,6 +278,12 @@ elif [ "$1" == "stop-worker-on-port" ]; then
         exit 1
     fi
     stop_worker_on_port "$2"
+elif [ "$1" == "amdal-analysis" ]; then
+    if [ -z "$2" ] || [ -z "$3" ]; then
+        echo "Usage: $0 amdal-analysis <number_of_splits> <max_number_of_workers>"
+        exit 1
+    fi
+    launch_amdal_analysis_fixed_dataset "$2" "$3"    
 else
     echo "Usage: $0 {deploy|start|stop|full|logs|clean-amdal-results|results|stop-worker-on-port <port>}"
     echo "  deploy                 : Déployer les fichiers Python dans le workspace local"
@@ -192,5 +294,6 @@ else
     echo "  clean-amdal-results    : Supprimer le fichier des résultats Amdahl"
     echo "  results                : Afficher le contenu du fichier des résultats Amdahl"
     echo "  stop-worker-on-port <port> : Arrêter le Worker utilisant le port de shuffle spécifié"
+    echo "  amdal-analysis <number_of_splits> <max_number_of_workers> : Lancer une série de tests Amdahl sur un dataset fixe"
     exit 1
 fi

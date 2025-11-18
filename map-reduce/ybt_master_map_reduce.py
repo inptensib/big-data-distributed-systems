@@ -1,7 +1,7 @@
 import asyncio
 import os
 import argparse
-import protocoldata701 as protocol  # Utilise le nom de votre module
+import protocoldata701 as protocol  # Utilise le nom de module du protocol
 import time
 from datetime import datetime
 import csv
@@ -26,6 +26,10 @@ total_data_size_mb = 0.0
 
 HEALTH_CHECK_INTERVAL = 10
 WORKER_TIMEOUT = 30
+
+# ▼▼▼ AJOUT (Signal d'arrêt global) ▼▼▼
+SHUTDOWN_EVENT = asyncio.Event()
+# ▲▲▲
 
 
 def log_job_result(num_workers, num_splits, total_data_size_mb, exec_time):
@@ -120,13 +124,10 @@ async def trigger_reduce_phase():
     )
 
 
-# -----------------------------------------------------------------
-# ▼▼▼ FONCTION MODIFIÉE (Accepte un paramètre `success`) ▼▼▼
-# -----------------------------------------------------------------
 async def trigger_global_shutdown(success=True):
     """
     Envoie l'ordre "SHUTDOWN" final, affiche le résumé et logue le résultat.
-    Accepte un booléen `success` pour gérer les arrêts sur échec.
+    Déclenche ensuite l'arrêt du Master.
     """
     global \
         job_start_time, \
@@ -176,7 +177,6 @@ async def trigger_global_shutdown(success=True):
         )
         logging.error("=" * 40 + "\n")
         JOB_STATE = "FAILED"
-    # ▲▲▲ FIN MODIFICATION ▲▲▲
 
     logging.info(f"[MASTER] Envoi de l'ordre SHUTDOWN à {len(workers)} workers...")
 
@@ -184,12 +184,14 @@ async def trigger_global_shutdown(success=True):
     shutdown_tasks = []
     for w in workers:
         shutdown_tasks.append(protocol.send_json(w["writer"], shutdown_msg))
+
+    # Attendre que tous les messages SHUTDOWN soient partis
     await asyncio.gather(*shutdown_tasks, return_exceptions=True)
 
-
-# -----------------------------------------------------------------
-# ▲▲▲ FIN DE LA MODIFICATION ▲▲▲
-# -----------------------------------------------------------------
+    # ▼▼▼ AJOUT (Déclenche l'arrêt du Master) ▼▼▼
+    logging.info("[MASTER] Tous les workers notifiés. Arrêt du Master imminent...")
+    SHUTDOWN_EVENT.set()
+    # ▲▲▲
 
 
 async def check_job_status():
@@ -206,13 +208,9 @@ async def check_job_status():
     if JOB_STATE == "MAPPING" and map_tasks_completed == total_splits:
         await trigger_reduce_phase()
     elif JOB_STATE == "REDUCING" and reduce_tasks_completed == NUM_WORKERS_ATTENDUS:
-        # ▼▼▼ MODIFICATION (Appel avec succès=True) ▼▼▼
         await trigger_global_shutdown(success=True)
 
 
-# -----------------------------------------------------------------
-# ▼▼▼ FONCTION MODIFIÉE (Gestion de l'échec en phase REDUCE) ▼▼▼
-# -----------------------------------------------------------------
 async def handle_worker_death(worker_info, reason="inconnue"):
     """
     Gère la panne d'un worker.
@@ -226,7 +224,7 @@ async def handle_worker_death(worker_info, reason="inconnue"):
         JOB_STATE
 
     if worker_info not in workers:
-        return  # Déjà géré
+        return
 
     worker_id = worker_info["id"]
     logging.warning(
@@ -452,6 +450,10 @@ async def health_check_loop():
     Tourne en arrière-plan et vérifie les workers zombies.
     """
     while True:
+        # Si l'événement SHUTDOWN est activé, on arrête la boucle de santé
+        if SHUTDOWN_EVENT.is_set():
+            break
+
         await asyncio.sleep(HEALTH_CHECK_INTERVAL)
 
         async with counter_lock:
@@ -468,7 +470,7 @@ async def health_check_loop():
                 now - worker_info["last_heartbeat"] > WORKER_TIMEOUT
             ):
                 logging.warning(
-                    f"[HEALTH-CHECK] Worker {worker_info['id']} est TIMEOUT (dernier heartbeat il y a {now - worker_info['last_heartbeat']:.0f}s)."
+                    f"[HEALTH-CHECK] Worker {worker_info['id']} est TIMEOUT."
                 )
                 async with counter_lock:
                     await handle_worker_death(worker_info, reason="Timeout (zombie)")
@@ -483,7 +485,7 @@ async def main(master_port, num_workers, splits_dir, limit_splits):
         splits_in_progress, \
         JOB_STATE
 
-    # Réinitialisation des globales (utile si 'main' était appelé plusieurs fois)
+    # Initialisation
     workers.clear()
     splits_to_process.clear()
     splits_in_progress.clear()
@@ -491,9 +493,8 @@ async def main(master_port, num_workers, splits_dir, limit_splits):
     map_tasks_completed = 0
     reduce_tasks_completed = 0
     job_start_time = 0.0
-
     NUM_WORKERS_ATTENDUS = num_workers
-    splits_in_progress = {}
+    SHUTDOWN_EVENT.clear()  # Réinitialiser l'événement
 
     try:
         all_files = [
@@ -523,7 +524,7 @@ async def main(master_port, num_workers, splits_dir, limit_splits):
         total_data_size_mb = total_bytes / (1024 * 1024)
 
         logging.info(
-            f"[MASTER] Fichiers splits à traiter : {total_splits} (sur {len(all_files)} trouvés). Taille totale: {total_data_size_mb:.4f} Mo"
+            f"[MASTER] Fichiers splits à traiter : {total_splits} (Taille totale: {total_data_size_mb:.4f} Mo)"
         )
         if not splits_to_process and num_workers > 0:
             logging.warning("[MASTER] ATTENTION: Aucun fichier split à traiter.")
@@ -548,16 +549,27 @@ async def main(master_port, num_workers, splits_dir, limit_splits):
 
     try:
         async with server:
-            await server.serve_forever()
+            # ▼▼▼ MODIFICATION MAJEURE ▼▼▼
+            # On n'utilise plus serve_forever().
+            # On lance le service, puis on attend le signal d'arrêt.
+            await server.start_serving()
+            await SHUTDOWN_EVENT.wait()
+            # ▲▲▲
+            logging.info("[MASTER] Signal d'arrêt reçu. Fermeture du serveur...")
+
     except asyncio.CancelledError:
-        logging.info("[MASTER] Serveur principal arrêté.")
+        logging.info("[MASTER] Serveur principal annulé.")
     finally:
         health_task.cancel()
         try:
             await health_task
         except asyncio.CancelledError:
             pass
-        logging.info("[MASTER] Tâche de health check arrêtée.")
+
+        # Fermer le serveur proprement
+        server.close()
+        await server.wait_closed()
+        logging.info("[MASTER] Master arrêté proprement. Bye.")
 
 
 if __name__ == "__main__":
