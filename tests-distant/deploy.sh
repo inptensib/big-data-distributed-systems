@@ -48,8 +48,14 @@ create_job_directories() {
 
 
 get_master_and_workers_list() {
-    echo "--- Étape 1 : Récupération de la liste des machine disponibles ---"
+    echo "--- Vérification de la présence de jq ---"
+    if ! command -v jq &> /dev/null; then
+        echo "Erreur : 'jq' n'est pas installé. Veuillez l'installer pour continuer."
+        exit 1
+    fi
     
+    echo "--- Étape 1 : Récupération de la liste des machine disponibles ---"
+
     API_OUTPUT=$(curl -sL --connect-timeout 5 "$API_URL")
     CURL_EXIT_CODE=$?
 
@@ -281,24 +287,31 @@ clean_all() {
     clean_job_directories
 }
 
-# ▼▼▼ NOUVELLE FONCTION : Afficher les logs du job courant ▼▼▼
 logs() {
     get_current_job_id
     echo "--- Affichage des logs du Job ID: $JOB_ID (Ctrl+C pour arrêter) ---"
     trap 'kill $(jobs -p) 2>/dev/null; echo "\nArrêt du tail."; exit' INT TERM
     
-    echo "Logs du Master:"
-    ssh $MASTER_HOST "tail -f /tmp/YBT_${JOB_ID}/logs/master.log" &
+    # Extraire l'IP/hostname du master pour le préfixe
+    MASTER_IP=${MASTER_HOST#*@}
     
+    # ▼▼▼ CORRECTION : Échapper correctement sed dans SSH ▼▼▼
+    echo "Démarrage du tail sur Master ($MASTER_IP)..."
+    ssh $MASTER_HOST "tail -f /tmp/YBT_${JOB_ID}/logs/master.log 2>/dev/null" 2>&1 | sed "s/^/[MASTER:${MASTER_IP}] /" &
+    
+    # Logs des Workers avec préfixe [WORKER:ip:port]
+    current_port=$SHUFFLE_PORT_START
     for worker_host in "${WORKERS_TO_LAUNCH[@]}"; do
-        echo "Logs du Worker sur $worker_host:"
-        ssh $worker_host "tail -f /tmp/YBT_${JOB_ID}/logs/worker_*.log" &
+        WORKER_IP=${worker_host#*@}
+        echo "Démarrage du tail sur Worker ($WORKER_IP:$current_port)..."
+        ssh $worker_host "tail -f /tmp/YBT_${JOB_ID}/logs/worker_${current_port}.log 2>/dev/null" 2>&1 | sed "s/^/[WORKER:${WORKER_IP}:${current_port}] /" &
+        current_port=$((current_port + 1))
     done
+    # ▲▲▲
 
     wait
 }
 
-# ▼▼▼ NOUVELLE FONCTION : Afficher les logs d'un worker spécifique ▼▼▼
 logs_worker() {
     get_current_job_id
     local worker_port="$1"
@@ -313,8 +326,11 @@ logs_worker() {
     current_port=$SHUFFLE_PORT_START
     for worker_host in "${WORKERS_TO_LAUNCH[@]}"; do
         if [ "$current_port" -eq "$worker_port" ]; then
+            WORKER_IP=${worker_host#*@}
             echo "--- Logs du Worker sur $worker_host (Port: $worker_port, Job ID: $JOB_ID) ---"
-            ssh $worker_host "tail -f /tmp/YBT_${JOB_ID}/logs/worker_${worker_port}.log"
+            # ▼▼▼ CORRECTION : Échapper correctement sed ▼▼▼
+            ssh $worker_host "tail -f /tmp/YBT_${JOB_ID}/logs/worker_${worker_port}.log 2>/dev/null" 2>&1 | sed "s/^/[WORKER:${WORKER_IP}:${worker_port}] /"
+            # ▲▲▲
             return
         fi
         current_port=$((current_port + 1))
@@ -323,34 +339,6 @@ logs_worker() {
     echo "Erreur: Aucun worker trouvé pour le port $worker_port"
     exit 1
 }
-
-# ▼▼▼ NOUVELLE FONCTION : Collecter tous les logs ▼▼▼
-collect_logs() {
-    get_current_job_id
-    echo "--- Collecte des logs du Job ID: $JOB_ID ---"
-    
-    LOCAL_LOGS_DIR="${TEST_WORKSPACE}/collected_logs_${JOB_ID}"
-    mkdir -p "$LOCAL_LOGS_DIR"
-    
-    echo "  -> Collecte des logs du Master"
-    scp "$MASTER_HOST:/tmp/YBT_${JOB_ID}/logs/master.log" "$LOCAL_LOGS_DIR/" 2>/dev/null || echo "     Échec"
-    
-    current_port=$SHUFFLE_PORT_START
-    for worker_host in "${WORKERS_TO_LAUNCH[@]}"; do
-        worker_ip=${worker_host#*@}
-        if [ "$worker_ip" == "$MASTER_HOST" ]; then
-            current_port=$((current_port + 1))
-            continue
-        fi
-        echo "  -> Collecte des logs de $worker_host (port $current_port)"
-        scp "$worker_host:/tmp/YBT_${JOB_ID}/logs/worker_${current_port}.log" \
-            "$LOCAL_LOGS_DIR/worker_${current_port}_${worker_ip}.log" 2>/dev/null || echo "     Échec"
-        current_port=$((current_port + 1))
-    done
-    
-    echo "--- Logs collectés dans $LOCAL_LOGS_DIR ---"
-}
-# ▲▲▲
 
 collect_outputs() {
     get_current_job_id
@@ -380,7 +368,10 @@ show_amdal_results() {
     echo "--- Affichage des résultats Amdahl ($AMDAL_RESULT_FILE_PATH) ---"
     ssh $NFS_MACHINE "cat $AMDAL_RESULT_FILE_PATH" || echo "Aucun fichier $AMDAL_RESULT_FILE_PATH trouvé."
 }
-
+prepare_environment() {
+    mkdir -p "$TEST_WORKSPACE"
+}
+prepare_environment
 # --- Point d'Entrée du Script ---
 case "$1" in
     retrieve-master-nfs-server-and-workers)

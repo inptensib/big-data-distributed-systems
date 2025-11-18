@@ -7,6 +7,7 @@ import sys
 import time
 import re
 import zlib
+import subprocess  # ▼▼▼ AJOUT (Pour le tri externe) ▼▼▼
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -19,6 +20,9 @@ SHUFFLE_MODE = "disk"
 OUTPUT_DIRECTORY = "/tmp"
 HEARTBEAT_INTERVAL = 5
 
+# ▼▼▼ AJOUT (Pour corriger la race condition) ▼▼▼
+SHUFFLE_SERVER_INSTANCE = None
+
 # ▼▼▼ MODE RAM : Dictionnaire {mot: [count1, count2, ...]} ▼▼▼
 intermediate_data = defaultdict(list)
 data_lock = asyncio.Lock()
@@ -29,64 +33,24 @@ YIELD_INTERVAL = 500000
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ REDUCE BLOQUANT (Thread-Safe) ▼▼▼
+# ▼▼▼ REDUCE BLOQUANT (Thread-Safe) - MODIFIÉ POUR SCALABILITÉ ▼▼▼
 # -----------------------------------------------------------------
 def reduce_blocking(shuffle_mode, shuffle_port, output_file, intermediate_data_copy):
     """
     Fonction BLOQUANTE qui exécute le REDUCE dans un thread.
+    Utilise le tri externe (external sort) en mode disque pour éviter les OOM.
     """
-    pairs = []
     global OUTPUT_DIRECTORY
     try:
-        if shuffle_mode == "ram":
-            # --- MODE RAM ---
-            logging.info(
-                f"[REDUCE] Lecture de {len(intermediate_data_copy)} clés depuis la RAM..."
-            )
-            for key, values in intermediate_data_copy.items():
-                for value in values:
-                    pairs.append((key, value))
-        else:
-            # --- MODE DISQUE ---
-            shuffle_file = f"{OUTPUT_DIRECTORY}/shuffle_data_{shuffle_port}.tmp"
-            try:
-                logging.info(f"[REDUCE] Lecture du fichier shuffle {shuffle_file}...")
-                reduce_read_counter = 0
-                log_interval = 1_000_000
-
-                with open(shuffle_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        try:
-                            key, value = line.strip().split("\t")
-                            pairs.append((key, int(value)))
-                            reduce_read_counter += 1
-                            if reduce_read_counter % log_interval == 0:
-                                logging.info(
-                                    f"[REDUCE] ... Lecture : {reduce_read_counter:,} paires..."
-                                )
-                        except Exception:
-                            pass
-
-                logging.info(f"[REDUCE] Lecture terminée. Total {len(pairs):,} paires.")
-                os.remove(shuffle_file)
-            except FileNotFoundError:
-                logging.info(f"[REDUCE] Fichier shuffle {shuffle_file} non trouvé.")
-
-        # --- Tri et Réduction ---
-        if not pairs:
-            logging.warning("[REDUCE] Aucune donnée à réduire.")
-            return True
-
-        logging.info(f"[REDUCE] Tri de {len(pairs):,} paires...")
-        pairs.sort(key=lambda x: x[0])
-        logging.info("[REDUCE] Tri terminé.")
-
-        logging.info("[REDUCE] Application de la réduction...")
-        with open(output_file, "w", encoding="utf-8") as f_out:
+        # --- Logique de streaming (utilisée par les deux modes) ---
+        def stream_reduce(input_iterator, f_out):
+            logging.info("[REDUCE] Application de la réduction (en streaming)...")
             current_key = None
             current_values = []
+            reduce_read_counter = 0
+            log_interval = 1_000_000
 
-            for key, value in pairs:
+            for key, value in input_iterator:
                 if key != current_key and current_key is not None:
                     result_key, result_value = reduce_function(
                         current_key, current_values
@@ -97,10 +61,111 @@ def reduce_blocking(shuffle_mode, shuffle_port, output_file, intermediate_data_c
                 current_key = key
                 current_values.append(value)
 
+                reduce_read_counter += 1
+                if reduce_read_counter % log_interval == 0:
+                    logging.info(
+                        f"[REDUCE] ... Traitement : {reduce_read_counter:,} paires..."
+                    )
+
             # Dernière clé
             if current_key is not None:
                 result_key, result_value = reduce_function(current_key, current_values)
                 f_out.write(f"{result_key}\t{result_value}\n")
+            logging.info(
+                f"[REDUCE] Traitement streaming terminé. Total {reduce_read_counter:,} paires."
+            )
+
+        if shuffle_mode == "ram":
+            # --- MODE RAM ---
+            if not intermediate_data_copy:
+                logging.warning("[REDUCE] Aucune donnée à réduire (RAM).")
+                return True
+
+            logging.info(
+                f"[REDUCE] Lecture de {len(intermediate_data_copy)} clés depuis la RAM..."
+            )
+            pairs = []
+            for key, values in intermediate_data_copy.items():
+                for value in values:
+                    pairs.append((key, value))
+
+            logging.info(f"[REDUCE] Tri de {len(pairs):,} paires (RAM)...")
+            pairs.sort(key=lambda x: x[0])
+            logging.info("[REDUCE] Tri terminé.")
+
+            with open(output_file, "w", encoding="utf-8") as f_out:
+                stream_reduce(iter(pairs), f_out)
+
+        else:
+            # --- MODE DISQUE ---
+            shuffle_file = f"{OUTPUT_DIRECTORY}/shuffle_data_{shuffle_port}.tmp"
+            sorted_file = f"{OUTPUT_DIRECTORY}/shuffle_data_{shuffle_port}.sorted"
+
+            try:
+                # ▼▼▼ MODIFICATION (Tri externe pour éviter OOM) ▼▼▼
+                logging.info(
+                    f"[REDUCE] Tri externe de {shuffle_file} vers {sorted_file}..."
+                )
+                start_sort = time.time()
+                # Utilise 'sort' (GNU coreutils).
+                # LC_ALL=C est pour la performance (sort binaire/ordre des octets).
+                # -k1,1 trie sur la 1ère colonne (clé).
+                # -t$'\t' définit le tab comme séparateur.
+                # -T spécifie un répertoire temporaire.
+                sort_command = f"LC_ALL=C sort -k1,1 -t$'\t' -T {OUTPUT_DIRECTORY} {shuffle_file} -o {sorted_file}"
+
+                logging.debug(f"[REDUCE] Commande de tri: {sort_command}")
+                result = subprocess.run(
+                    sort_command,
+                    shell=True,  # shell=True est nécessaire pour -t$'\t'
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.stderr:
+                    logging.warning(f"[REDUCE] Sort stderr: {result.stderr}")
+
+                logging.info(
+                    f"[REDUCE] Tri externe terminé en {time.time() - start_sort:.2f}s"
+                )
+
+                # Itérateur pour lire le fichier trié ligne par ligne
+                def file_iterator(sorted_file_path):
+                    with open(sorted_file_path, "r", encoding="utf-8") as f_in:
+                        for line in f_in:
+                            try:
+                                key, value = line.strip().split("\t")
+                                yield (key, int(value))
+                            except Exception:
+                                logging.warning(
+                                    f"[REDUCE] Ligne malformée ignorée: {line.strip()}"
+                                )
+                                pass
+
+                with open(output_file, "w", encoding="utf-8") as f_out:
+                    stream_reduce(file_iterator(sorted_file), f_out)
+
+                # Nettoyage
+                logging.info("[REDUCE] Nettoyage des fichiers temporaires.")
+                os.remove(shuffle_file)
+                os.remove(sorted_file)
+                # ▲▲▲ FIN MODIFICATION ▲▲▲
+
+            except FileNotFoundError:
+                logging.info(
+                    f"[REDUCE] Fichier shuffle {shuffle_file} non trouvé. (Mode disque)"
+                )
+                return True  # Pas une erreur si aucun shuffle n'a été reçu
+            except subprocess.CalledProcessError as e:
+                logging.error(
+                    f"[REDUCE] Échec du tri externe: {e.stderr}", exc_info=True
+                )
+                return False
+            except Exception as e:
+                logging.error(
+                    f"[REDUCE] Erreur pendant le reduce (disque): {e}", exc_info=True
+                )
+                return False
 
         logging.info(
             f"[REDUCE-THREAD] Phase REDUCE terminée. Résultat dans {output_file}"
@@ -138,6 +203,9 @@ def map_function(split_path):
                             logging.info(
                                 f"[MAP] ... {split_path} : {word_count:,} mots traités..."
                             )
+                        # ▼▼▼ MODIFICATION (JSON envoie des listes, pas des tuples) ▼▼▼
+                        # Le yield d'un tuple est ok, il sera converti en liste
+                        # par le 'buffer.append()' et la sérialisation JSON.
                         yield (word_clean, 1)
 
         logging.info(f"[MAP] Terminé {split_path}: {word_count:,} mots au total")
@@ -154,13 +222,14 @@ def reduce_function(key, values):
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ SHUFFLE SERVER (Reçoit les batches) ▼▼▼
+# ▼▼▼ SHUFFLE SERVER (Reçoit les batches) - MODIFIÉ (JSON) ▼▼▼
 # -----------------------------------------------------------------
 async def store_intermediate_data_batch(data_batch):
     """Stocke un batch de données en RAM."""
     global intermediate_data, data_lock
     try:
         async with data_lock:
+            # data_batch est une liste de listes: [[k, v], [k, v]]
             for key, value in data_batch:
                 intermediate_data[key].append(value)
     except Exception as e:
@@ -170,13 +239,12 @@ async def store_intermediate_data_batch(data_batch):
 async def handle_shuffle_connection(reader, writer):
     """
     Reçoit le shuffle et le stocke (RAM ou Disque).
-    SUPPORTE MAINTENANT LES BATCHES (listes de tuples).
+    SUPPORTE LES BATCHES (listes de listes [key, value]).
     """
     global OUTPUT_DIRECTORY
     addr = writer.get_extra_info("peername")
     shuffle_file = None
     f_out = None
-
 
     try:
         if SHUFFLE_MODE == "disk":
@@ -184,26 +252,45 @@ async def handle_shuffle_connection(reader, writer):
             f_out = open(shuffle_file, "a", encoding="utf-8")
 
         while True:
-            data_object = await protocol.receive_pickle(reader)
+            # ▼▼▼ MODIFICATION (Pickle -> JSON) ▼▼▼
+            # data_object sera une liste de listes: [[k, v], [k, v]]
+            # ▼▼▼ MODIFICATION (Utiliser la version compressée) ▼▼▼
+            data_object = await protocol.receive_compressed_json(reader)
+            # ▲▲▲ FIN MODIFICATION ▲▲▲
             if not data_object:
                 break
 
-            # ▼▼▼ GESTION BATCH vs TUPLE UNIQUE ▼▼▼
+            # JSON ne nous enverra que des listes.
             if isinstance(data_object, list):
-                # C'est un BATCH
-                if SHUFFLE_MODE == "ram":
-                    await store_intermediate_data_batch(data_object)
+                # C'est un BATCH (ou un seul item [k,v] envoyé par JSON)
+
+                # Vérifier si c'est bien un batch (liste de listes)
+                if data_object and isinstance(data_object[0], list):
+                    # C'est un BATCH
+                    if SHUFFLE_MODE == "ram":
+                        await store_intermediate_data_batch(data_object)
+                    else:
+                        for key, value in data_object:
+                            f_out.write(f"{key}\t{value}\n")
                 else:
-                    for key, value in data_object:
-                        f_out.write(f"{key}\t{value}\n")
+                    # C'est un TUPLE UNIQUE (rétrocompatibilité)
+                    # ou un batch malformé ? Tentons de le dépaqueter.
+                    try:
+                        key, value = data_object
+                        if SHUFFLE_MODE == "ram":
+                            async with data_lock:
+                                intermediate_data[key].append(value)
+                        else:
+                            f_out.write(f"{key}\t{value}\n")
+                    except Exception:
+                        logging.warning(
+                            f"[SHUFFLE-RECV] Donnée non-batch invalide reçue: {data_object}"
+                        )
+
             else:
-                # C'est un TUPLE UNIQUE (rétrocompatibilité)
-                key, value = data_object
-                if SHUFFLE_MODE == "ram":
-                    async with data_lock:
-                        intermediate_data[key].append(value)
-                else:
-                    f_out.write(f"{key}\t{value}\n")
+                logging.warning(
+                    f"[SHUFFLE-RECV] Type de donnée inattendu (non-liste): {type(data_object)}"
+                )
             # ▲▲▲
 
     except (asyncio.IncompleteReadError, ConnectionResetError):
@@ -221,18 +308,30 @@ async def handle_shuffle_connection(reader, writer):
 
 
 async def run_shuffle_server(host, port):
+    # ▼▼▼ MODIFICATION (Race Condition) ▼▼▼
+    global SHUFFLE_SERVER_INSTANCE
     server = await asyncio.start_server(handle_shuffle_connection, host, port)
+    SHUFFLE_SERVER_INSTANCE = server
+    # ▲▲▲ FIN MODIFICATION ▲▲▲
+
     logging.info(f"[WORKER] Serveur de Shuffle démarré sur {host}:{port}")
-    async with server:
-        await server.serve_forever()
+    try:
+        async with server:
+            await server.serve_forever()
+    except asyncio.CancelledError:
+        logging.debug("[WORKER] Tâche run_shuffle_server annulée.")
+    except Exception as e:
+        # Gérer l'erreur si le serveur est fermé pendant qu'il 'serve_forever'
+        logging.debug(f"[WORKER] Serveur de shuffle arrêté (cause: {e})")
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ PROCESS SPLIT (MAP + SHUFFLE OPTIMISÉ PAR BATCHING) ▼▼▼
+# ▼▼▼ PROCESS SPLIT (MAP + SHUFFLE OPTIMISÉ PAR BATCHING) - MODIFIÉ (JSON) ▼▼▼
 # -----------------------------------------------------------------
 async def process_split(split_path):
     """
     Applique le MAP, puis gère le SHUFFLE avec BATCHING.
+    Envoie les batches en JSON.
     """
     global OUTPUT_DIRECTORY
     logging.info(f"[WORKER-PROCESS] Traitement (Map+Shuffle) de {split_path}...")
@@ -254,29 +353,40 @@ async def process_split(split_path):
 
         start_time = time.time()
 
+        # Le buffer est une liste de tuples (k, v).
+        # send_json va le convertir en liste de listes [[k, v], [k, v]]
+        data_to_send = list(buffer)
+
         if target_id == MY_WORKER_ID:
             # --- LOCAL ---
             if SHUFFLE_MODE == "ram":
-                await store_intermediate_data_batch(buffer)
+                await store_intermediate_data_batch(data_to_send)
             else:
-                for key, val in buffer:
+                for key, val in data_to_send:
                     f_local_shuffle.write(f"{key}\t{val}\n")
         else:
             # --- REMOTE ---
             writer = peer_writers.get(target_id)
             if writer:
                 try:
-                    await protocol.send_pickle(writer, buffer)
+                    # ▼▼▼ MODIFICATION (Utiliser la version compressée) ▼▼▼
+                    await protocol.send_compressed_json(writer, data_to_send)
+                    # ▲▲▲ FIN MODIFICATION ▲▲▲
                 except Exception as e:
-                    logging.error(f"[SHUFFLE] Erreur envoi vers Worker {target_id}: {e}")
+                    logging.error(
+                        f"[SHUFFLE] Erreur envoi vers Worker {target_id}: {e}"
+                    )
+                    # Idéalement: gestion de l'échec (ré-essai, ou marquer le worker comme mort)
+                    # Pour l'instant, on logue et on perd le batch.
 
         elapsed = time.time() - start_time
         if elapsed > 0.5:
             logging.warning(
-                f"[SHUFFLE] Flush lent vers Worker {target_id}: {elapsed:.2f}s pour {len(buffer)} items"
+                f"[SHUFFLE] Flush lent vers Worker {target_id}: {elapsed:.2f}s pour {len(data_to_send)} items"
             )
 
         buffer.clear()
+
     # ▲▲▲
 
     try:
@@ -287,11 +397,17 @@ async def process_split(split_path):
             try:
                 reader, writer = await asyncio.open_connection(host, port)
                 peer_writers[peer_id] = writer
-                logging.debug(f"[PROCESS-SPLIT] Connexion établie avec Worker {peer_id}")
+                logging.debug(
+                    f"[PROCESS-SPLIT] Connexion établie avec Worker {peer_id}"
+                )
             except ConnectionRefusedError:
                 logging.error(
                     f"[PROCESS-SPLIT] Impossible de contacter le peer {peer_id} @ {host}:{port}"
                 )
+                # Si on ne peut pas contacter un peer, on ne peut pas continuer.
+                # Gérer cette panne est complexe (le master devrait le savoir).
+                # Pour l'instant, on continue, mais les données pour ce peer seront perdues.
+                # Une meilleure solution serait de lever une exception ici.
 
         # 2. Ouvrir fichier local (si mode disque)
         if SHUFFLE_MODE == "disk":
@@ -326,22 +442,28 @@ async def process_split(split_path):
 
         # ▼▼▼ FLUSH FINAL AMÉLIORÉ AVEC STATISTIQUES ▼▼▼
         logging.info(f"[PROCESS-SPLIT] Flush final des buffers...")
-        
+
         # Flush local
         if local_buffer:
-            logging.info(f"[PROCESS-SPLIT] Flush final local: {len(local_buffer)} items restants")
+            logging.info(
+                f"[PROCESS-SPLIT] Flush final local: {len(local_buffer)} items restants"
+            )
             await flush_buffer(MY_WORKER_ID, local_buffer)
-        
+
         # Flush remote
         total_remaining = 0
         for peer_id, buffer in peer_buffers.items():
             if buffer:
                 total_remaining += len(buffer)
-                logging.info(f"[PROCESS-SPLIT] Flush final vers Worker {peer_id}: {len(buffer)} items restants")
+                logging.info(
+                    f"[PROCESS-SPLIT] Flush final vers Worker {peer_id}: {len(buffer)} items restants"
+                )
                 await flush_buffer(peer_id, buffer)
-        
+
         if total_remaining > 0:
-            logging.info(f"[PROCESS-SPLIT] Total des items dans les buffers finaux: {total_remaining:,}")
+            logging.info(
+                f"[PROCESS-SPLIT] Total des items dans les buffers finaux: {total_remaining:,}"
+            )
         # ▲▲▲
 
     except Exception as e:
@@ -378,17 +500,11 @@ async def send_heartbeat(writer):
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ CONNEXION AU MASTER ▼▼▼
+# ▼▼▼ CONNEXION AU MASTER - MODIFIÉ (Race Condition) ▼▼▼
 # -----------------------------------------------------------------
-async def connect_to_master(master_host, master_port):
+async def connect_to_master(master_host, master_port, task_shuffle):
     """Se connecte au Master et écoute les ordres."""
-    global \
-        peer_workers, \
-        MY_WORKER_ID, \
-        MY_HOST_ADDRESS, \
-        OUTPUT_DIRECTORY, \
-        intermediate_data, \
-        data_lock
+    global peer_workers, MY_WORKER_ID, MY_HOST_ADDRESS, OUTPUT_DIRECTORY, intermediate_data, data_lock, SHUFFLE_SERVER_INSTANCE  # <-- AJOUT
 
     logging.info(
         f"[WORKER] Tentative de connexion au Master sur {master_host}:{master_port}"
@@ -457,7 +573,7 @@ async def connect_to_master(master_host, master_port):
                                 f"[WORKER] Message 'DONE' envoyé avec succès pour {result_dict.get('payload')}"
                             )
                         else:
-                            logging.error("[WORKER] Échec de l'envoi 'DONE'")
+                            logging.error("[WORKKER] Échec de l'envoi 'DONE'")
                     except Exception as e:
                         logging.warning(f"[WORKER] Erreur envoi 'DONE': {e}")
 
@@ -469,7 +585,31 @@ async def connect_to_master(master_host, master_port):
                 logging.info("[WORKER] Plus de tâches MAP. En attente de REDUCE...")
 
             elif msg_type == "REDUCE":
-                logging.info("[WORKER] Ordre REDUCE reçu. Démarrage dans un thread...")
+                logging.info(
+                    "[WORKER] Ordre REDUCE reçu. Fermeture du serveur de shuffle..."
+                )
+
+                # ▼▼▼ MODIFICATION (Correction de la Race Condition) ▼▼▼
+                if SHUFFLE_SERVER_INSTANCE:
+                    try:
+                        SHUFFLE_SERVER_INSTANCE.close()
+                        await SHUFFLE_SERVER_INSTANCE.wait_closed()
+                        logging.info("[WORKER] Serveur de shuffle arrêté.")
+                    except Exception as e:
+                        logging.warning(
+                            f"[WORKER] Erreur à la fermeture du serveur de shuffle: {e}"
+                        )
+                else:
+                    logging.warning(
+                        "[WORKER] Instance du serveur de shuffle non trouvée, impossible de fermer."
+                    )
+
+                # Attendre que la tâche du serveur se termine vraiment
+                await task_shuffle
+                logging.info("[WORKER] Tâche du serveur de shuffle confirmée terminée.")
+                # ▲▲▲ FIN MODIFICATION ▲▲▲
+
+                logging.info("[WORKER] Démarrage de REDUCE dans un thread...")
 
                 payload = message.get("payload", {})
                 job_id = payload.get("job_id", f"job_{int(time.time())}")
@@ -504,7 +644,9 @@ async def connect_to_master(master_host, master_port):
                                 "[WORKER] Message 'REDUCE_DONE' envoyé avec succès"
                             )
                         else:
-                            logging.error("[WORKER] REDUCE a échoué")
+                            logging.error(
+                                "[WORKER] REDUCE a échoué. Envoi de l'échec au Master impossible (non implémenté)."
+                            )
                     except Exception as e:
                         logging.error(f"[WORKER] Erreur callback REDUCE: {e}")
 
@@ -512,7 +654,6 @@ async def connect_to_master(master_host, master_port):
 
             elif msg_type == "SHUTDOWN":
                 logging.info("[WORKER] Ordre SHUTDOWN reçu. Arrêt...")
-                sys
                 break
 
     except (asyncio.CancelledError, ConnectionResetError) as e:
@@ -554,17 +695,24 @@ async def main():
     OUTPUT_DIRECTORY = args.result_output
     BATCH_SIZE = args.batch_size
 
+    # La tâche du serveur de shuffle s'arrêtera quand 'server.close()'
+    # sera appelé dans 'connect_to_master' (lors du REDUCE) ou ici.
     task_shuffle = asyncio.create_task(run_shuffle_server("0.0.0.0", args.shuffle_port))
     task_master_comm = asyncio.create_task(
-        connect_to_master(args.master_host, args.master_port)
+        connect_to_master(args.master_host, args.master_port, task_shuffle)
     )
 
     try:
-        await asyncio.gather(task_shuffle, task_master_comm)
+        # On attend seulement la connexion au master, qui gère maintenant
+        # le cycle de vie de la tâche shuffle
+        await task_master_comm
     except Exception as e:
         logging.error(f"[WORKER MAIN] Erreur: {e}")
+    finally:
         task_shuffle.cancel()
         task_master_comm.cancel()
+        await asyncio.gather(task_shuffle, task_master_comm, return_exceptions=True)
+        logging.info("[WORKER_MAIN] Tâches principales terminées.")
 
 
 if __name__ == "__main__":

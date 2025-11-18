@@ -84,7 +84,7 @@ start() {
             --shuffle-port $((WORKERS_INITIAL_PORT + i + 1)) \
             --shuffle-mode $SHUFFLE_MODE \
             --batch-size $SHUFFLE_BATCH_SIZE \
-            --output-dir ${TEST_WORKSPACE}/${JOB_ID}/output \
+            --result-output ${TEST_WORKSPACE}/${JOB_ID}/output \
                 > ${TEST_WORKSPACE}/${JOB_ID}/logs/worker_$((WORKERS_INITIAL_PORT + i + 1)).log 2>&1 &
         echo "       Worker PID: $!"
         sleep 1 # Délai pour laisser les processus démarrer proprement
@@ -141,7 +141,10 @@ show_amdal_results() {
         echo "Le fichier $AMDAL_RESULT_FILE_PATH n'existe pas."
     fi
 }
-
+prepare_environment() {
+    mkdir -p "$TEST_WORKSPACE"
+}
+prepare_environment
 # --- 3. Point d'Entrée ---
 if [ "$1" == "deploy" ]; then
     deploy

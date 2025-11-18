@@ -121,44 +121,64 @@ async def trigger_reduce_phase():
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ FONCTION MODIFIÉE ▼▼▼
+# ▼▼▼ FONCTION MODIFIÉE (Accepte un paramètre `success`) ▼▼▼
 # -----------------------------------------------------------------
-async def trigger_global_shutdown():
+async def trigger_global_shutdown(success=True):
     """
     Envoie l'ordre "SHUTDOWN" final, affiche le résumé et logue le résultat.
+    Accepte un booléen `success` pour gérer les arrêts sur échec.
     """
-    global job_start_time, NUM_WORKERS_ATTENDUS, total_splits, total_data_size_mb
+    global \
+        job_start_time, \
+        NUM_WORKERS_ATTENDUS, \
+        total_splits, \
+        total_data_size_mb, \
+        JOB_STATE
 
     # Calcul des temps
     total_job_time_sec = time.monotonic() - job_start_time
     total_job_time_min = total_job_time_sec / 60.0
 
-    # ▼▼▼ NOUVEAU BLOC DE RÉSUMÉ ▼▼▼
-    logging.info("\n" + "=" * 40)
-    logging.info("---  RÉSUMÉ FINAL DU JOB  ---")
-    logging.info(f"    Nombre total de splits traités : {total_splits}")
-    logging.info(f"    Nombre de workers utilisés    : {NUM_WORKERS_ATTENDUS}")
-    logging.info(
-        f"    Temps d'exécution total : {total_job_time_min:.2f} minutes ({total_job_time_sec:.2f} secondes)"
-    )
-    logging.info("=" * 40 + "\n")
-    # ▲▲▲ FIN DU NOUVEAU BLOC ▲▲▲
+    # ▼▼▼ MODIFICATION (Gestion de l'état final) ▼▼▼
+    if success:
+        # --- CAS DE SUCCÈS ---
+        logging.info("\n" + "=" * 40)
+        logging.info("---  RÉSUMÉ FINAL DU JOB (SUCCÈS) ---")
+        logging.info(f"    Nombre total de splits traités : {total_splits}")
+        logging.info(f"    Nombre de workers utilisés    : {NUM_WORKERS_ATTENDUS}")
+        logging.info(
+            f"    Temps d'exécution total : {total_job_time_min:.2f} minutes ({total_job_time_sec:.2f} secondes)"
+        )
+        logging.info("=" * 40 + "\n")
 
-    # Logguer dans le CSV (utilise les secondes pour la précision)
-    log_job_result(
-        NUM_WORKERS_ATTENDUS,
-        total_splits,
-        total_data_size_mb,
-        total_job_time_sec,
-    )
+        # Logguer dans le CSV (uniquement en cas de succès)
+        log_job_result(
+            NUM_WORKERS_ATTENDUS,
+            total_splits,
+            total_data_size_mb,
+            total_job_time_sec,
+        )
+        logging.info(
+            f"[MASTER] Toutes les {NUM_WORKERS_ATTENDUS} tâches REDUCE sont terminées."
+        )
+        JOB_STATE = "FINISHED"
 
-    logging.info(
-        f"[MASTER] Toutes les {NUM_WORKERS_ATTENDUS} tâches REDUCE sont terminées."
-    )
-    global JOB_STATE
-    JOB_STATE = "FINISHED"
+    else:
+        # --- CAS D'ÉCHEC ---
+        logging.error("\n" + "=" * 40)
+        logging.error("---  RÉSUMÉ FINAL DU JOB (ÉCHEC) ---")
+        logging.error(
+            "Le job s'est terminé en raison d'une erreur fatale (ex: worker mort pendant REDUCE)."
+        )
+        logging.error("L'état est 'FAILED'. Aucun résultat ne sera sauvegardé.")
+        logging.error(
+            f"    Temps écoulé avant l'échec : {total_job_time_min:.2f} minutes"
+        )
+        logging.error("=" * 40 + "\n")
+        JOB_STATE = "FAILED"
+    # ▲▲▲ FIN MODIFICATION ▲▲▲
 
-    logging.info("\n" + "=" * 30 + "\n [MASTER] JOB GLOBAL TERMINÉ ! \n" + "=" * 30)
+    logging.info(f"[MASTER] Envoi de l'ordre SHUTDOWN à {len(workers)} workers...")
 
     shutdown_msg = {"type": "SHUTDOWN"}
     shutdown_tasks = []
@@ -186,14 +206,24 @@ async def check_job_status():
     if JOB_STATE == "MAPPING" and map_tasks_completed == total_splits:
         await trigger_reduce_phase()
     elif JOB_STATE == "REDUCING" and reduce_tasks_completed == NUM_WORKERS_ATTENDUS:
-        await trigger_global_shutdown()
+        # ▼▼▼ MODIFICATION (Appel avec succès=True) ▼▼▼
+        await trigger_global_shutdown(success=True)
 
 
+# -----------------------------------------------------------------
+# ▼▼▼ FONCTION MODIFIÉE (Gestion de l'échec en phase REDUCE) ▼▼▼
+# -----------------------------------------------------------------
 async def handle_worker_death(worker_info, reason="inconnue"):
     """
     Gère la panne d'un worker.
+    Si la panne survient pendant REDUCE, le job est considéré comme échoué.
     """
-    global workers, splits_in_progress, splits_to_process, NUM_WORKERS_ATTENDUS
+    global \
+        workers, \
+        splits_in_progress, \
+        splits_to_process, \
+        NUM_WORKERS_ATTENDUS, \
+        JOB_STATE
 
     if worker_info not in workers:
         return  # Déjà géré
@@ -211,6 +241,26 @@ async def handle_worker_death(worker_info, reason="inconnue"):
     except Exception:
         pass
 
+    # ▼▼▼ MODIFICATION (Gestion de l'échec en phase REDUCE) ▼▼▼
+    if JOB_STATE == "REDUCING":
+        logging.error(
+            f"[MASTER] DÉFAILLANCE FATALE: Worker {worker_id} est mort pendant la phase REDUCE."
+        )
+        logging.error(
+            "[MASTER] Le résultat du job est compromis. Lancement d'un arrêt d'urgence."
+        )
+        # L'état FAILED empêchera check_job_status de se déclencher
+        if JOB_STATE != "FAILED":  # Évite les appels multiples
+            await trigger_global_shutdown(success=False)
+        return
+    elif JOB_STATE == "FAILED":
+        logging.warning(
+            f"[MASTER] Un autre worker ({worker_id}) est mort pendant l'arrêt d'urgence."
+        )
+        return
+    # ▲▲▲ FIN MODIFICATION ▲▲▲
+
+    # --- Logique de ré-assignation (Phase MAPPING) ---
     tasks_to_requeue = []
     for split_path, assigned_worker_id in list(splits_in_progress.items()):
         if assigned_worker_id == worker_id:
@@ -223,11 +273,11 @@ async def handle_worker_death(worker_info, reason="inconnue"):
     logging.info(
         f"[MASTER] Ré-assignation de {len(tasks_to_requeue)} tâches du Worker {worker_id}..."
     )
-    async with counter_lock:
-        for split_path in tasks_to_requeue:
-            del splits_in_progress[split_path]
-            splits_to_process.insert(0, split_path)
-            logging.info(f"[MASTER] Split {split_path} remis dans la queue.")
+    # Le 'counter_lock' est déjà tenu par la fonction appelante (handle_worker ou health_check_loop)
+    for split_path in tasks_to_requeue:
+        del splits_in_progress[split_path]
+        splits_to_process.insert(0, split_path)
+        logging.info(f"[MASTER] Split {split_path} remis dans la queue.")
 
 
 async def handle_worker(reader, writer):
@@ -242,7 +292,8 @@ async def handle_worker(reader, writer):
         total_splits, \
         NUM_WORKERS_ATTENDUS, \
         job_start_time, \
-        splits_in_progress
+        splits_in_progress, \
+        JOB_STATE
 
     worker_info = None
 
@@ -257,55 +308,75 @@ async def handle_worker(reader, writer):
         addr = writer.get_extra_info("peername")
         shuffle_port = reg_message["port"]
 
-        worker_info = {
-            "id": len(workers),
-            "addr": addr,
-            "shuffle_addr": (addr[0], shuffle_port),
-            "writer": writer,
-            "last_heartbeat": time.monotonic(),
-        }
-        workers.append(worker_info)
-        logging.info(
-            f"[MASTER] Worker {worker_info['id']} enregistré. Écoute sur {worker_info['shuffle_addr']}"
-        )
+        async with counter_lock:
+            # Ne pas accepter de nouveaux workers si le job est en cours de finition ou a échoué
+            if JOB_STATE not in ["MAPPING", "REDUCING"]:
+                logging.warning(
+                    f"[MASTER] Worker a tenté de s'enregistrer pendant l'état {JOB_STATE}. Refusé."
+                )
+                await protocol.send_json(writer, {"type": "SHUTDOWN"})
+                return
 
-        if len(workers) == NUM_WORKERS_ATTENDUS:
-            if job_start_time == 0.0:
-                job_start_time = time.monotonic()
-
-            logging.info("[MASTER] Tous les workers sont connectés. Synchronisation...")
-            worker_list_payload = [
-                {
-                    "id": w["id"],
-                    "ip": w["shuffle_addr"][0],
-                    "port": w["shuffle_addr"][1],
-                }
-                for w in workers
-            ]
-            sync_tasks = []
-            for w in workers:
-                sync_message = {
-                    "type": "SYNC",
-                    "payload": {"all_peers": worker_list_payload, "your_id": w["id"]},
-                }
-                sync_tasks.append(protocol.send_json(w["writer"], sync_message))
-            await asyncio.gather(*sync_tasks)
-
+            worker_info = {
+                "id": len(workers),
+                "addr": addr,
+                "shuffle_addr": (addr[0], shuffle_port),
+                "writer": writer,
+                "last_heartbeat": time.monotonic(),
+            }
+            workers.append(worker_info)
             logging.info(
-                f"[MASTER] Assignation de la première tâche MAP à {len(workers)} workers..."
+                f"[MASTER] Worker {worker_info['id']} enregistré. Écoute sur {worker_info['shuffle_addr']}"
             )
-            async with counter_lock:
+
+            if len(workers) == NUM_WORKERS_ATTENDUS and JOB_STATE == "MAPPING":
+                if job_start_time == 0.0:
+                    job_start_time = time.monotonic()
+
+                logging.info(
+                    "[MASTER] Tous les workers sont connectés. Synchronisation..."
+                )
+                worker_list_payload = [
+                    {
+                        "id": w["id"],
+                        "ip": w["shuffle_addr"][0],
+                        "port": w["shuffle_addr"][1],
+                    }
+                    for w in workers
+                ]
+                sync_tasks = []
+                for w in workers:
+                    sync_message = {
+                        "type": "SYNC",
+                        "payload": {
+                            "all_peers": worker_list_payload,
+                            "your_id": w["id"],
+                        },
+                    }
+                    sync_tasks.append(protocol.send_json(w["writer"], sync_message))
+                await asyncio.gather(*sync_tasks)
+
+                logging.info(
+                    f"[MASTER] Assignation de la première tâche MAP à {len(workers)} workers..."
+                )
                 assignment_tasks = []
                 for w_info in workers:
                     task = assign_next_split(w_info["writer"], w_info["id"])
                     assignment_tasks.append(task)
                 await asyncio.gather(*assignment_tasks)
-            logging.info("[MASTER] Toutes les assignations initiales sont envoyées.")
+                logging.info(
+                    "[MASTER] Toutes les assignations initiales sont envoyées."
+                )
 
         while True:
             message = await protocol.receive_json(reader)
             if not message:
                 raise ConnectionResetError("Le worker a fermé la connexion proprement.")
+
+            if JOB_STATE == "FAILED":
+                # Si le job a échoué, on ne traite plus les messages sauf pour le shutdown
+                await protocol.send_json(writer, {"type": "SHUTDOWN"})
+                continue
 
             if worker_info:
                 worker_info["last_heartbeat"] = time.monotonic()
@@ -330,8 +401,9 @@ async def handle_worker(reader, writer):
                         )
                         continue
 
-                    await assign_next_split(writer, worker_info["id"])
-                    await check_job_status()
+                    if JOB_STATE == "MAPPING":
+                        await assign_next_split(writer, worker_info["id"])
+                        await check_job_status()
 
             elif msg_type == "REDUCE_DONE":
                 async with counter_lock:
@@ -357,11 +429,16 @@ async def handle_worker(reader, writer):
             exc_info=True,
         )
     finally:
+        # Assurer que 'handle_worker_death' est appelé même si l'enregistrement a échoué
         if worker_info and worker_info in workers:
             logging.info(f"[MASTER] Nettoyage final du worker {worker_info['id']}.")
             async with counter_lock:
                 if worker_info in workers:
-                    workers.remove(worker_info)
+                    # 'handle_worker_death' gère la suppression de 'workers'
+                    await handle_worker_death(worker_info, reason="Nettoyage final")
+        elif worker_info and worker_info not in workers:
+            logging.debug(f"[MASTER] Worker {worker_info['id']} déjà géré (nettoyage).")
+
         if writer:
             try:
                 writer.close()
@@ -378,7 +455,12 @@ async def health_check_loop():
         await asyncio.sleep(HEALTH_CHECK_INTERVAL)
 
         async with counter_lock:
+            # Ne pas exécuter le check si le job est fini
+            if JOB_STATE in ["FINISHED", "FAILED"]:
+                break
+
             workers_to_check = workers[:]
+
         now = time.monotonic()
 
         for worker_info in workers_to_check:
@@ -398,7 +480,18 @@ async def main(master_port, num_workers, splits_dir, limit_splits):
         splits_to_process, \
         total_splits, \
         total_data_size_mb, \
-        splits_in_progress
+        splits_in_progress, \
+        JOB_STATE
+
+    # Réinitialisation des globales (utile si 'main' était appelé plusieurs fois)
+    workers.clear()
+    splits_to_process.clear()
+    splits_in_progress.clear()
+    JOB_STATE = "MAPPING"
+    map_tasks_completed = 0
+    reduce_tasks_completed = 0
+    job_start_time = 0.0
+
     NUM_WORKERS_ATTENDUS = num_workers
     splits_in_progress = {}
 
@@ -434,11 +527,17 @@ async def main(master_port, num_workers, splits_dir, limit_splits):
         )
         if not splits_to_process and num_workers > 0:
             logging.warning("[MASTER] ATTENTION: Aucun fichier split à traiter.")
+            # Si 0 splits mais --workers > 0, le job se terminera_
+            # dès que les workers se connecteront et ne recevront pas de travail.
+            # C'est un comportement acceptable.
 
     except FileNotFoundError:
         logging.error(
             f"[MASTER] ERREUR: Le dossier de splits '{splits_dir}' n'existe pas."
         )
+        return
+    except Exception as e:
+        logging.error(f"[MASTER] Erreur lors de la préparation des splits: {e}")
         return
 
     server = await asyncio.start_server(handle_worker, "0.0.0.0", master_port)
@@ -450,8 +549,15 @@ async def main(master_port, num_workers, splits_dir, limit_splits):
     try:
         async with server:
             await server.serve_forever()
+    except asyncio.CancelledError:
+        logging.info("[MASTER] Serveur principal arrêté.")
     finally:
         health_task.cancel()
+        try:
+            await health_task
+        except asyncio.CancelledError:
+            pass
+        logging.info("[MASTER] Tâche de health check arrêtée.")
 
 
 if __name__ == "__main__":
