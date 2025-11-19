@@ -481,6 +481,16 @@ lauch_amdal_analysis_fixed() {
 }
 # ▲▲▲
 
+show_used_servers() {
+    echo "--- Serveurs utilisés ---"
+    echo "Master/NFS: $MASTER_HOST"
+    echo "Workers:"
+    for worker in "${WORKERS_TO_LAUNCH[@]}"; do
+        echo "  - $worker"
+    done
+}
+
+
 # ▼▼▼ 2. Préparation de l'Environnement ▼▼▼
 prepare_environment() {
     mkdir -p "$TEST_WORKSPACE"
@@ -584,8 +594,13 @@ case "$1" in
         lauch_amdal_analysis_fixed "$2" "$3"
         show_amdal_results
         ;;
+    show-used-servers)
+        get_stored_master_nfs_server
+        get_stored_workers_list
+        show_used_servers
+        ;;
     *)
-        echo "Usage: $0 [deploy|start|stop|full|full-rate-limit|clean-amdal-results|clean-reduce-outputs|clean-job|logs|logs-worker|collect-logs|results|retrieve-master-nfs-server-and-workers|stop-worker-on-host|collect-outputs]"
+        echo "Usage: $0 [deploy|start|stop|full|full-rate-limit|clean-amdal-results|clean-reduce-outputs|clean-job|logs|logs-worker|collect-logs|results|retrieve-master-nfs-server-and-workers|stop-worker-on-host|collect-outputs|show-used-servers]"
         echo ""
         echo "Commandes:"
         echo "  deploy                                   - Copie les fichiers Python sur le NFS"
@@ -604,6 +619,7 @@ case "$1" in
         echo "  stop-worker-on-host <worker_host>        - Arrête le worker sur l'hôte spécifié"
         echo "  collect-outputs                          - Récupère tous les outputs des workers"
         echo "  launch-amdal-analysis-fixed-dataset <num_splits> <max_workers> - Lance une analyse Amdahl sur un dataset fixe"
+        echo "  show-used-servers                       - Affiche les serveurs master/NFS et workers utilisés"
         exit 1
         ;;
 esac

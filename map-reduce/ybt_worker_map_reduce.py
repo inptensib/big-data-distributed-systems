@@ -8,8 +8,9 @@ import time
 import regex
 import unicodedata
 import zlib
+import functools
 
-# import subprocess # ◄-- SUPPRIMÉ (remplacé par tri-fusion)
+
 import uuid  # ◄-- AJOUT (pour les "runs" disque)
 import heapq  # ◄-- AJOUT (pour le tri-fusion)
 import glob  # ◄-- AJOUT (pour trouver les "runs")
@@ -28,25 +29,30 @@ HEARTBEAT_INTERVAL = 5
 
 SHUFFLE_SERVER_INSTANCE = None
 
-# ▼▼▼ OPTIMISATION RAM (Combiner) ▼▼▼
+# OPTIMISATION RAM (Combiner)
 # Stocke {mot: total_local} au lieu de {mot: [1, 1, ...]}
-intermediate_data = defaultdict(int)  # ◄-- MODIFIÉ (list -> int)
+intermediate_data = defaultdict(int)  
 data_lock = asyncio.Lock()
-# ▲▲▲ FIN OPTIMISATION ▲▲▲
 
-# ▼▼▼ CONFIGURATION BATCHING ▼▼▼
-BATCH_SIZE = 50000
+# CONFIGURATION BATCHING
+BATCH_SIZE = 100000
 YIELD_INTERVAL = 500000
 
-# ▼▼▼ NOUVEAU (Scalabilité Disque) ▼▼▼
+# Scalabilité Disque
 # Limite de sécurité pour les descripteurs de fichiers ouverts simultanément
 # Doit être inférieur à 'ulimit -n' (ex: 1024, 4096)
 MAX_OPEN_FILES_MERGE = 512
-# ▲▲▲ FIN NOUVEAU ▲▲▲
 
 
+@functools.lru_cache(maxsize=500000)
+def get_hash(key: str) -> int:
+    """
+    Calcule et met en cache le CRC32 d'une clé.
+    Cache LRU : 500k entrées max (~10 Mo RAM).
+    """
+    return zlib.crc32(key.encode("utf-8"))
 # -----------------------------------------------------------------
-# ▼▼▼ HELPER POUR LE MULTI-LEVEL MERGE ▼▼▼
+# HELPER POUR LE MULTI-LEVEL MERGE
 # -----------------------------------------------------------------
 def _merge_files_to_new_file(input_files: list, output_filename: str):
     """
@@ -105,7 +111,7 @@ def _merge_files_to_new_file(input_files: list, output_filename: str):
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ REDUCE BLOQUANT (Thread-Safe) - VERSION FINALE ▼▼▼
+# REDUCE BLOQUANT (Thread-Safe)
 # -----------------------------------------------------------------
 def reduce_blocking(shuffle_mode, shuffle_port, output_file, intermediate_data_copy):
     """
@@ -315,7 +321,7 @@ def reduce_blocking(shuffle_mode, shuffle_port, output_file, intermediate_data_c
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ LOGIQUE APPLICATIVE (MAP / REDUCE) - INCHANGÉE ▼▼▼
+# LOGIQUE APPLICATIVE (MAP / REDUCE)
 # -----------------------------------------------------------------
 def map_function(split_path):
     """
@@ -365,7 +371,7 @@ def reduce_function(key, values):
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ STOCKAGE SHUFFLE (RAM) - MODIFIÉ (Combiner) ▼▼▼
+# STOCKAGE SHUFFLE (RAM) (Combiner)
 # -----------------------------------------------------------------
 async def store_intermediate_data_batch(data_batch):
     """
@@ -384,7 +390,7 @@ async def store_intermediate_data_batch(data_batch):
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ SHUFFLE SERVER (Reçoit les batches) - MODIFIÉ (Sort-Merge) ▼▼▼
+# SHUFFLE SERVER (Reçoit les batches) - (Sort-Merge)
 # -----------------------------------------------------------------
 async def handle_shuffle_connection(reader, writer):
     """
@@ -485,20 +491,24 @@ async def run_shuffle_server(host, port):
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ PROCESS SPLIT (MAP + SHUFFLE) - MODIFIÉ (Optimisation RAM/Disque) ▼▼▼
+#  PROCESS SPLIT - VERSION MONO-THREAD PURE ASYNC
 # -----------------------------------------------------------------
 async def process_split(split_path):
     """
-    Applique le MAP, puis gère le SHUFFLE avec BATCHING.
-    Envoie les batches en JSON compressé.
-    Utilise le stockage (Combiner RAM ou Runs Disque) optimisé.
+    MAP en streaming pur + SHUFFLE async avec batching.
+    AUCUN threading : exploit maximum du parallélisme inter-splits.
     """
     global OUTPUT_DIRECTORY
     logging.info(f"[WORKER-PROCESS] Traitement (Map+Shuffle) de {split_path}...")
     num_machines = len(peer_workers)
+    if num_machines == 0:
+        logging.error("[WORKER-PROCESS] Aucun peer connu (SYNC pas encore reçu ?)")
+        return {"type": "DONE", "payload": split_path}
+
     peer_writers = {}
     map_counter = 0
 
+    # Buffers de batching (un par destination)
     peer_buffers = defaultdict(list)
     local_buffer = []
 
@@ -507,23 +517,20 @@ async def process_split(split_path):
         if not buffer:
             return
 
-        start_time = time.time()
-        data_to_send = list(buffer)  # data_to_send est [[k,v], [k,v], ...]
+        data_to_send = list(buffer)
 
         if target_id == MY_WORKER_ID:
-            # --- LOCAL ---
+            # LOCAL
             if SHUFFLE_MODE == "ram":
-                # ▼▼▼ MODIFICATION (Appelle le Combiner) ▼▼▼
                 await store_intermediate_data_batch(data_to_send)
-                # ▲▲▲ FIN MODIFICATION ▲▲▲
             else:
-                # ▼▼▼ MODIFICATION (Écrit un "run" trié) ▼▼▼
+                # Mode DISK : écrire un "run" trié
                 try:
                     data_to_send.sort(key=lambda x: x[0])
                 except Exception as e:
                     logging.warning(f"[SHUFFLE-SORT-LOCAL] Batch malformé: {e}")
                     buffer.clear()
-                    return  # Ne pas continuer si le tri échoue
+                    return
 
                 run_filename = f"{OUTPUT_DIRECTORY}/shuffle_run_{MY_SHUFFLE_PORT}_{uuid.uuid4().hex}.tmp"
                 try:
@@ -535,30 +542,21 @@ async def process_split(split_path):
                     logging.error(
                         f"[SHUFFLE-WRITE-LOCAL] Échec écriture run {run_filename}: {e}"
                     )
-                # ▲▲▲ FIN MODIFICATION ▲▲▲
         else:
-            # --- REMOTE ---
+            # DISTANT
             writer = peer_writers.get(target_id)
             if writer:
                 try:
-                    # Utilise la version compressée
                     await protocol.send_compressed_json(writer, data_to_send)
                 except Exception as e:
                     logging.error(
                         f"[SHUFFLE] Erreur envoi vers Worker {target_id}: {e}"
                     )
-                    # Données perdues pour ce batch
-
-        elapsed = time.time() - start_time
-        if elapsed > 0.5:
-            logging.warning(
-                f"[SHUFFLE] Flush lent vers Worker {target_id}: {elapsed:.2f}s pour {len(data_to_send)} items"
-            )
 
         buffer.clear()
 
+    # 1. Ouvrir connexions aux peers
     try:
-        # 1. Ouvrir connexions aux peers
         for peer_id, (host, port) in peer_workers.items():
             if peer_id == MY_WORKER_ID:
                 continue
@@ -569,55 +567,50 @@ async def process_split(split_path):
                 logging.error(
                     f"[PROCESS-SPLIT] Impossible de contacter le peer {peer_id} @ {host}:{port}: {e}"
                 )
-                # Continue, mais les données pour ce peer seront perdues.
+    except Exception as e:
+        logging.error(
+            f"[PROCESS-SPLIT] Erreur ouverture connexions: {e}", exc_info=True
+        )
 
-        # 2. Boucle Map + Shuffle avec BATCHING
-        for data_tuple in map_function(split_path):
+    # 2. MAP + SHUFFLE en streaming (MONO-THREAD)
+    try:
+        for key, value in map_function(split_path):
             try:
                 map_counter += 1
-                key = data_tuple[0]
-                hash_value = zlib.crc32(key.encode("utf-8"))
+                hash_value = get_hash(key)
                 target_index = hash_value % num_machines
 
                 if target_index == MY_WORKER_ID:
-                    local_buffer.append(data_tuple)
+                    local_buffer.append((key, value))
                     if len(local_buffer) >= BATCH_SIZE:
                         await flush_buffer(MY_WORKER_ID, local_buffer)
                 else:
-                    peer_buffers[target_index].append(data_tuple)
+                    peer_buffers[target_index].append((key, value))
                     if len(peer_buffers[target_index]) >= BATCH_SIZE:
                         await flush_buffer(target_index, peer_buffers[target_index])
 
+                # Yield périodique pour éviter de bloquer l'event loop
                 if map_counter % YIELD_INTERVAL == 0:
                     await asyncio.sleep(0)
 
             except Exception as e:
-                logging.warning(f"[MAP-LOOP] Erreur sur {data_tuple}: {e}")
+                logging.warning(f"[MAP-LOOP] Erreur sur ({key}, {value}): {e}")
 
-        # 3. Flush final des buffers restants
+    except Exception as e:
+        logging.error(f"[PROCESS-SPLIT] Erreur fatale sur {split_path}: {e}")
+        raise  # Propage l'erreur pour notifier le Master
+    finally:
+        # 3. Flush final de tous les buffers
         logging.info(f"[PROCESS-SPLIT] Flush final des buffers...")
 
-        # Flush local d'abord
         if local_buffer:
             await flush_buffer(MY_WORKER_ID, local_buffer)
 
-        # Flush distants en parallèle
-        flush_tasks = []
         for peer_id, buffer in peer_buffers.items():
             if buffer:
-                flush_tasks.append(flush_buffer(peer_id, buffer))
+                await flush_buffer(peer_id, buffer)
 
-        if flush_tasks:
-            await asyncio.gather(*flush_tasks, return_exceptions=True)
-            logging.info(
-                f"[PROCESS-SPLIT] Flush final des {len(flush_tasks)} buffers distants terminé."
-            )
-
-    except Exception as e:
-        logging.error(
-            f"[PROCESS-SPLIT] Erreur fatale sur {split_path}: {e}", exc_info=True
-        )
-    finally:
+        # 4. Fermer toutes les connexions
         logging.info(f"[PROCESS-SPLIT] Nettoyage des connexions pour {split_path}")
         for writer in peer_writers.values():
             try:
@@ -633,7 +626,7 @@ async def process_split(split_path):
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ HEARTBEAT (Inchangé) ▼▼▼
+# HEARTBEAT
 # -----------------------------------------------------------------
 async def send_heartbeat(writer):
     try:
@@ -647,7 +640,7 @@ async def send_heartbeat(writer):
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ CONNEXION AU MASTER (Logique REDUCE modifiée) ▼▼▼
+# CONNEXION AU MASTER
 # -----------------------------------------------------------------
 async def connect_to_master(master_host, master_port, task_shuffle):
     """Se connecte au Master et écoute les ordres."""

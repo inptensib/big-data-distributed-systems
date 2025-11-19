@@ -27,9 +27,9 @@ total_data_size_mb = 0.0
 HEALTH_CHECK_INTERVAL = 10
 WORKER_TIMEOUT = 30
 
-# ▼▼▼ AJOUT (Signal d'arrêt global) ▼▼▼
+# AJOUT (Signal d'arrêt global) 
 SHUTDOWN_EVENT = asyncio.Event()
-# ▲▲▲
+
 
 
 def log_job_result(num_workers, num_splits, total_data_size_mb, exec_time):
@@ -140,7 +140,7 @@ async def trigger_global_shutdown(success=True):
     total_job_time_sec = time.monotonic() - job_start_time
     total_job_time_min = total_job_time_sec / 60.0
 
-    # ▼▼▼ MODIFICATION (Gestion de l'état final) ▼▼▼
+    #  MODIFICATION (Gestion de l'état final) 
     if success:
         # --- CAS DE SUCCÈS ---
         logging.info("\n" + "=" * 40)
@@ -188,7 +188,7 @@ async def trigger_global_shutdown(success=True):
     # Attendre que tous les messages SHUTDOWN soient partis
     await asyncio.gather(*shutdown_tasks, return_exceptions=True)
 
-    # ▼▼▼ AJOUT (Déclenche l'arrêt du Master) ▼▼▼
+    #  AJOUT (Déclenche l'arrêt du Master) 
     logging.info("[MASTER] Tous les workers notifiés. Arrêt du Master imminent...")
     SHUTDOWN_EVENT.set()
     # ▲▲▲
@@ -239,7 +239,7 @@ async def handle_worker_death(worker_info, reason="inconnue"):
     except Exception:
         pass
 
-    # ▼▼▼ MODIFICATION (Gestion de l'échec en phase REDUCE) ▼▼▼
+    #  MODIFICATION (Gestion de l'échec en phase REDUCE) 
     if JOB_STATE == "REDUCING":
         logging.error(
             f"[MASTER] DÉFAILLANCE FATALE: Worker {worker_id} est mort pendant la phase REDUCE."
@@ -490,9 +490,6 @@ async def main(master_port, num_workers, splits_dir, limit_splits):
     splits_to_process.clear()
     splits_in_progress.clear()
     JOB_STATE = "MAPPING"
-    map_tasks_completed = 0
-    reduce_tasks_completed = 0
-    job_start_time = 0.0
     NUM_WORKERS_ATTENDUS = num_workers
     SHUTDOWN_EVENT.clear()  # Réinitialiser l'événement
 
@@ -541,7 +538,12 @@ async def main(master_port, num_workers, splits_dir, limit_splits):
         logging.error(f"[MASTER] Erreur lors de la préparation des splits: {e}")
         return
 
-    server = await asyncio.start_server(handle_worker, "0.0.0.0", master_port)
+    server = await asyncio.start_server(
+        handle_worker, 
+        "0.0.0.0", 
+        master_port,
+        backlog=100 
+        )
     addrs = ", ".join(str(sock.getsockname()) for sock in server.sockets)
     logging.info(f"[MASTER] Démarré. Écoute sur {addrs}...")
 
@@ -549,7 +551,7 @@ async def main(master_port, num_workers, splits_dir, limit_splits):
 
     try:
         async with server:
-            # ▼▼▼ MODIFICATION MAJEURE ▼▼▼
+            #  MODIFICATION MAJEURE 
             # On n'utilise plus serve_forever().
             # On lance le service, puis on attend le signal d'arrêt.
             await server.start_serving()
