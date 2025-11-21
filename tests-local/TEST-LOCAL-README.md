@@ -38,6 +38,7 @@ Le fichier `.env` définit les paramètres d'exécution. Voici les principales v
 ```bash
 cd tests-local;
 dos2unix *;
+dos2unix .*;
 chmod +x *.sh;
 chmod +x ../map-reduce/*.py;
 ```

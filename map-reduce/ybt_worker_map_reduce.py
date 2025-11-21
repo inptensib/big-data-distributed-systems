@@ -192,7 +192,7 @@ def reduce_blocking(shuffle_mode, shuffle_port, output_file, intermediate_data_c
 
             run_files_pattern = f"{OUTPUT_DIRECTORY}/shuffle_run_{shuffle_port}_*.tmp"
 
-            # ▼▼▼ LOGIQUE DE PRÉ-FUSION (Multi-Level Merge) ▼▼▼
+            # LOGIQUE DE PRÉ-FUSION (Multi-Level Merge)
 
             current_level_files = glob.glob(run_files_pattern)
             files_to_cleanup = list(
@@ -243,7 +243,6 @@ def reduce_blocking(shuffle_mode, shuffle_port, output_file, intermediate_data_c
                 )  # Ajouter les super-runs au nettoyage
                 level += 1
 
-            # ▲▲▲ FIN DE LA LOGIQUE DE PRÉ-FUSION ▲▲▲
 
             # À ce stade, len(current_level_files) <= MAX_OPEN_FILES_MERGE
             # Nous pouvons les ouvrir tous pour la fusion finale.

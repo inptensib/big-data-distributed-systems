@@ -45,6 +45,7 @@ Le fichier `.env` contient les variables essentielles pour le déploiement.
 ```bash
 cd tests-distant;
 dos2unix *;
+dos2unix .*;
 chmod +x *.sh;
 chmod +x ../map-reduce/*.py;
 chmod +x *.py;
