@@ -131,6 +131,10 @@ Arrête les processus Python sur toutes les machines distantes (A utiliser surto
 ./deploy.sh results display
 ./deploy.sh results download
 
+# Télécharger les résultats de reduce à partir des workers
+./deploy.sh collect-reduce-outputs
+
+
 # Nettoyer les fichiers temporaires distants
 ./deploy.sh clean-job
 ```
