@@ -16,7 +16,7 @@ Ce dossier contient les scripts nécessaires pour exécuter et tester le framewo
 
 ## Configuration
 
-Le fichier `.env` définit les paramètres d'exécution. Voici les principales variables à configurer :
+Le fichier `tests-local/.env` définit les paramètres d'exécution. Voici les principales variables à configurer :
 
 ### Chemins et Environnement
 - `CODE_PYTHON_DIR` : Chemin vers le code source Python (ex: `../map-reduce`).
@@ -60,7 +60,7 @@ Si vous n'avez pas encore de données, utilisez l'un des scripts de télécharge
 Copie les fichiers sources Python les plus récents dans l'espace de travail de test.
 
 ```bash
-./deploy_local.sh deploy
+./deploy_local.sh deploy 
 ```
 
 ### 3. Démarrage du Job (WordCount par défaut)
@@ -68,7 +68,8 @@ Copie les fichiers sources Python les plus récents dans l'espace de travail de 
 Lance le Master et les Workers. Un Job ID unique est généré (ex: `20251120_144511`).
 
 ```bash
-./deploy_local.sh start
+./deploy_local.sh start <number_of_splits> <number_of_workers>
+# Exemple : ./deploy_local.sh start 10 4
 ```
 
 ### 4. Suivi des Logs
@@ -87,15 +88,7 @@ Arrête tous les processus (Master et Workers).
 ./deploy_local.sh stop
 ```
 
-### 6. Nettoyage
-
-Supprime les fichiers temporaires, logs et sorties des jobs précédents.
-
-```bash
-./deploy_local.sh clean
-```
-
 ## Résultats
 
-- **Logs** : Disponibles dans `tests-local/workspace/<JOB_ID>/logs/`
-- **Sortie** : Les résultats du MapReduce sont dans `tests-local/workspace/<JOB_ID>/output/`
+- **Logs** : Disponibles dans `$TEST_WORKSPACE/<JOB_ID>/logs/`
+- **Sortie** : Les résultats du MapReduce sont dans `$TEST_WORKSPACE/<JOB_ID>/output/`

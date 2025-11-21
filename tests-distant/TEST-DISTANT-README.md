@@ -23,7 +23,7 @@ Ce dossier contient les scripts pour déployer et exécuter le framework MapRedu
 
 ## Configuration 
 
-Le fichier `.env` contient les variables essentielles pour le déploiement.
+Le fichier `tests-distant/.env` contient les variables essentielles pour le déploiement.
 
 ### Connexion et Infrastructure
 - `SSH_USER` : Nom d'utilisateur pour la connexion SSH (ex: `boutrouft-25`).
@@ -53,7 +53,7 @@ chmod +x *.py;
 Le script `deploy.sh` est le point d'entrée unique.
 
 ### 0. Mise à jour du fichier .env
-Avant de lancer des commandes, assurez-vous que le fichier `.env` est correctement configuré avec vos paramètres SSH, chemins, et ports.
+Avant de lancer des commandes, assurez-vous que le fichier `tests-distant/.env` est correctement configuré avec vos paramètres SSH, chemins, et ports.
 /!\ Surtout, vérifiez que `SSH_USER` correspond à votre user SSH.
 /!\ Assurez-vous que `REMOTE_PATH` est un chemin où vous avez les droits en écriture sur les machines distantes.
 
@@ -107,6 +107,7 @@ Plusieurs commandes sont disponibles pour surveiller l'exécution :
 
 # Logs d'un Worker spécifique (via son port de shuffle)
 ./deploy.sh logs-worker <port>
+# Exemple log du premier worker : ./deploy.sh logs-worker 9001 
 
 # Récupérer tous les logs dans le dossier local
 ./deploy.sh collect-logs
@@ -122,7 +123,19 @@ Arrête les processus Python sur toutes les machines distantes (A utiliser surto
 
 **Processus fantômes** : Utilisez `./deploy.sh stop` pour tuer tous les processus `python` liés au projet sur les machines distantes.
 
-### 7. Analyse de Performance (Loi d'Amdahl)
+
+### 7. Résultats et Nettoyage
+
+```bash
+# Afficher ou télécharger les résultats d'éxécution (CSV)
+./deploy.sh results display
+./deploy.sh results download
+
+# Nettoyer les fichiers temporaires distants
+./deploy.sh clean-job
+```
+
+### 8. Analyse de Performance (Loi d'Amdahl)
 
 Lance une série de tests automatisés avec un nombre variable de workers pour générer des courbes de speedup.
 
@@ -134,24 +147,11 @@ Lance une série de tests automatisés avec un nombre variable de workers pour g
 ou directement via le script :
 ```bash
 ./amdal_analyser.sh <csv_output_file>
-# Exemple : ./amdal_analyser.sh analysis_results.csv
-```
-
-### 7. Résultats et Nettoyage
-
-```bash
-# Afficher ou télécharger les résultats d'éxécution (CSV)
-./deploy.sh results display
-./deploy.sh results download
-
-# Nettoyer les fichiers temporaires distants
-./deploy.sh clean-job
-
-# Tout nettoyer (logs, outputs, résultats)
-./deploy.sh clean-all
+# Exemple : ./amdal_analyser.sh Resultats-Execution-CommonCrawl.csv
 ```
 
 ## Troubleshooting
 
 - **Problème de connexion** : Vérifiez que vos clés SSH sont bien propagées (`ssh-copy-id`).
 - **Processus fantômes** : Utilisez `./deploy.sh stop` pour tuer tous les processus `python` liés au projet sur les machines distantes.
+- **Ports occupés** : Assurez-vous que les ports définis dans `.env` ne sont pas utilisés par d'autres applications.

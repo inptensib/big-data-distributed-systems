@@ -507,8 +507,12 @@ case "$1" in
     full)
         get_stored_master_nfs_server
         get_stored_workers_list
+        if [ -z "$2" ]; then
+            echo "Usage: $0 start <number_of_splits>"
+            exit 1
+        fi
         deploy
-        start
+        start "$2"
         ;;
     clean-all)
         get_stored_master_nfs_server
