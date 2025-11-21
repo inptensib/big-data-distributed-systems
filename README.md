@@ -32,7 +32,7 @@ Cliquez [Ici](tests-local/TEST-LOCAL-README.md)
 ---
 
 ### **Cluster distant (Machine de l'école)**
-Cliquez [Ici](tests-local/TEST-DISTANT-README.md) 
+Cliquez [Ici](tests-distant/TEST-DISTANT-README.md) 
 
 ---
 
