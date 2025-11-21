@@ -140,7 +140,7 @@ async def trigger_global_shutdown(success=True):
     total_job_time_sec = time.monotonic() - job_start_time
     total_job_time_min = total_job_time_sec / 60.0
 
-    #  MODIFICATION (Gestion de l'état final) 
+    #  Gestion de l'état final
     if success:
         # --- CAS DE SUCCÈS ---
         logging.info("\n" + "=" * 40)
@@ -191,7 +191,6 @@ async def trigger_global_shutdown(success=True):
     #  AJOUT (Déclenche l'arrêt du Master) 
     logging.info("[MASTER] Tous les workers notifiés. Arrêt du Master imminent...")
     SHUTDOWN_EVENT.set()
-    # ▲▲▲
 
 
 async def check_job_status():
@@ -256,7 +255,6 @@ async def handle_worker_death(worker_info, reason="inconnue"):
             f"[MASTER] Un autre worker ({worker_id}) est mort pendant l'arrêt d'urgence."
         )
         return
-    # ▲▲▲ FIN MODIFICATION ▲▲▲
 
     # --- Logique de ré-assignation (Phase MAPPING) ---
     tasks_to_requeue = []

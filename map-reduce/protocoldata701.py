@@ -1,10 +1,9 @@
 import asyncio
 import json
 import logging
-import zlib  # <-- AJOUT POUR LA COMPRESSION
+import zlib  
 from typing import Union, Any
 
-# import pickle # <-- VOLONTAIREMENT SUPPRIMÉ (Faille de sécurité)
 
 
 async def receive_message(reader: asyncio.StreamReader) -> bytes:
@@ -73,7 +72,7 @@ async def receive_json(reader: asyncio.StreamReader) -> Union[Any, None]:
 
 
 # -----------------------------------------------------------------
-# ▼▼▼ NOUVELLE SECTION : JSON COMPRESSÉ (Pour le Shuffle Worker <-> Worker) ▼▼▼
+# JSON COMPRESSÉ (Pour le Shuffle Worker <-> Worker) 
 # -----------------------------------------------------------------
 async def send_compressed_json(writer: asyncio.StreamWriter, data_object: Any):
     """
@@ -85,9 +84,6 @@ async def send_compressed_json(writer: asyncio.StreamWriter, data_object: Any):
 
         # 2. Compresser
         compressed_bytes = zlib.compress(json_bytes)
-
-        # Optionnel: logguer le gain de compression
-        # logging.debug(f"[PROTO-ZLIB] Compression: {len(json_bytes)} -> {len(compressed_bytes)} octets")
 
         # 3. Envoyer les données compressées
         return await send_message(writer, compressed_bytes)

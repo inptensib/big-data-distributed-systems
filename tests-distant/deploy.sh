@@ -9,21 +9,20 @@ else
     echo "Le fichier .env est manquant"
 fi
 
-# ▼▼▼ 6. GESTION DU JOB ID ▼▼▼
+# 6. GESTION DU JOB ID
 JOB_ID=""
 JOB_ID_FILE=".current_job_id.txt"
-# ▲▲▲
 
 MACHINES_DISPONIBLES=() 
 
-# ▼▼▼ NOUVELLE FONCTION : Générer un Job ID ▼▼▼
+# Générer un Job ID
 generate_job_id() {
     JOB_ID="$(date +%Y%m%d_%H%M%S)"
     echo "$JOB_ID" > "$JOB_ID_FILE"
     echo "Job ID généré : $JOB_ID"
 }
 
-# ▼▼▼ NOUVELLE FONCTION : Récupérer le Job ID actuel ▼▼▼
+# Récupérer le Job ID actuel
 get_current_job_id() {
     if [ -f "$JOB_ID_FILE" ]; then
         JOB_ID=$(cat "$JOB_ID_FILE")
@@ -34,7 +33,9 @@ get_current_job_id() {
     fi
 }
 
-# ▼▼▼ NOUVELLE FONCTION : Créer les répertoires du job ▼▼▼
+# créer le répértoire distant dans le serveur nfs 
+
+#Créer les répertoires du job
 create_job_directories() {
     local host="$1"
     local host_type="$2"  # "master" ou "worker"
@@ -44,7 +45,6 @@ create_job_directories() {
     echo "     ✓ /tmp/YBT_${JOB_ID}/logs créé"
     echo "     ✓ /tmp/YBT_${JOB_ID}/output créé"
 }
-# ▲▲▲
 
 
 get_master_and_workers_list() {
@@ -55,7 +55,7 @@ get_master_and_workers_list() {
     fi
     
     echo "--- Étape 1 : Récupération de la liste des machine disponibles ---"
-
+    echo "Contact de l'API : $API_URL"
     API_OUTPUT=$(curl -sL --connect-timeout 5 "$API_URL")
     CURL_EXIT_CODE=$?
 
@@ -67,6 +67,9 @@ get_master_and_workers_list() {
         if [ -n "$API_SERVERS_LIST" ]; then
             echo "Succès : Serveurs trouvés depuis l'API."
             echo "$API_SERVERS_LIST" > "$CACHE_FILE"
+            #remove boutrouft-25@tp-1a207-31.enst.fr from the list
+            #remove boutrouft-25@tp-1a201-24.enst.fr from the list
+            API_SERVERS_LIST=$(echo "$API_SERVERS_LIST" | grep -v "boutrouft-25@tp-1a207-31.enst.fr" | grep -v "boutrouft-25@tp-1a201-24.enst.fr")
             readarray -t MACHINES_DISPONIBLES <<< "$API_SERVERS_LIST"
             # récupérer le premier serveur pour qu'il fasse le rôle de master et serveur nfs
             echo "--- Étape 2 : Récupération de la machine master/nfs"
@@ -118,14 +121,39 @@ get_master_and_workers_list() {
 }
 
 get_stored_workers_list() {
-    if [ -f "$WORKERS_CACHE_FILE" ]; then
-        read -a WORKERS_TO_LAUNCH < "$WORKERS_CACHE_FILE"
-        NUM_WORKERS_ACTUAL=${#WORKERS_TO_LAUNCH[@]}
-    else
+    echo "--- Récupération de la liste des workers depuis le cache ---"
+    
+    if [ ! -f "$WORKERS_CACHE_FILE" ]; then
         echo "Erreur : Le fichier ${WORKERS_CACHE_FILE} n'existe pas."
         echo "Exécuter d'abord :: $0 retrieve-master-nfs-server-and-workers"
         exit 1
     fi
+    
+    # Gérer tous les formats 
+    # Lire le fichier ligne par ligne ET mot par mot
+    WORKERS_TO_LAUNCH=()
+    
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Ignorer les lignes vides
+        [ -z "$line" ] && continue
+        
+        # Découper la ligne en mots (séparés par espaces/tabs)
+        for word in $line; do
+            # Ignorer les mots vides
+            [ -z "$word" ] && continue
+            WORKERS_TO_LAUNCH+=("$word")
+        done
+    done < "$WORKERS_CACHE_FILE"
+
+    NUM_WORKERS_ACTUAL=${#WORKERS_TO_LAUNCH[@]}
+    
+    if [ $NUM_WORKERS_ACTUAL -eq 0 ]; then
+        echo "Erreur : La liste des workers est vide dans ${WORKERS_CACHE_FILE}."
+        echo "Contenu du fichier :"
+        cat "$WORKERS_CACHE_FILE"
+        exit 1
+    fi
+    
 }
 get_stored_master_nfs_server() {
     if [ -f "$MASTER_NFS_SERVEUR_CACHE_FILE" ]; then
@@ -147,6 +175,10 @@ apply_delay() {
 
 deploy() {
     echo "--- Déploiement du code sur le NFS via $NFS_MACHINE ---"
+    #créer le répértoire distant dans le serveur nfs 
+    echo "  -> Création du répertoire distant $REMOTE_PATH sur $NFS_MACHINE ..."
+    ssh $NFS_MACHINE "mkdir -p $REMOTE_PATH" || true
+    echo "  -> Synchronisation des fichiers Python vers $NFS_MACHINE:$REMOTE_PATH ..."
     rsync -avz --delete \
         --exclude="*.pyc" \
         --exclude="__pycache__" \
@@ -171,9 +203,9 @@ start() {
     echo "--- Démarrage du Master (attend $NUM_WORKERS_ACTUAL workers) ---"
     echo "    [Job ID: $JOB_ID]"
     
-    # ▼▼▼ CRÉATION DES RÉPERTOIRES SUR LE MASTER ▼▼▼
+    # CRÉATION DES RÉPERTOIRES SUR LE MASTER ▼▼▼
     create_job_directories "$MASTER_HOST" "Master"
-    # ▲▲▲
+    #
     
     LIMIT_ARG=""
     if [ -n "$SPLIT_LIMIT" ]; then
@@ -181,7 +213,7 @@ start() {
         LIMIT_ARG="--limit-splits $SPLIT_LIMIT"
     fi
     
-    # ▼▼▼ MODIFICATION : Passer le JOB_ID au master + rediriger logs ▼▼▼
+    # rediriger logs
     ssh $MASTER_HOST "cd $REMOTE_PATH && \
         nohup python3 $MASTER_SCRIPT \
             --port $MASTER_PORT \
@@ -190,8 +222,7 @@ start() {
             --amdal-output $AMDAL_RESULT_FILE_PATH \
             $LIMIT_ARG \
             > /tmp/YBT_${JOB_ID}/logs/master.log 2>&1 &"
-    # ▲▲▲
-    
+
     echo "Master démarré sur $MASTER_HOST."
     echo "  -> Logs: /tmp/YBT_${JOB_ID}/logs/master.log"
     apply_delay
@@ -203,11 +234,10 @@ start() {
     for worker_host in "${WORKERS_TO_LAUNCH[@]}"; do
         echo "  -> Démarrage de $worker_host sur le port shuffle $current_shuffle_port"
 
-        # ▼▼▼ CRÉATION DES RÉPERTOIRES SUR CHAQUE WORKER ▼▼▼
+        # CRÉATION DES RÉPERTOIRES SUR CHAQUE WORKER
         create_job_directories "$worker_host" "Worker"
-        # ▲▲▲
 
-        # ▼▼▼ MODIFICATION : Passer le JOB_ID au worker + rediriger logs ▼▼▼
+        # rediriger logs
         # enlever la partie user@ pour avoir juste l'IP interne
         MASTER_IP_INTERNAL=${MASTER_HOST#*@}
         ssh $worker_host "cd $REMOTE_PATH && \
@@ -219,8 +249,7 @@ start() {
                 --batch-size $BATCH_SIZE \
                 --result-output /tmp/YBT_${JOB_ID}/output \
                 > /tmp/YBT_${JOB_ID}/logs/worker_${current_shuffle_port}.log 2>&1 &"
-        # ▲▲▲
-        
+
         echo "     ✓ Worker démarré. Logs: /tmp/YBT_${JOB_ID}/logs/worker_${current_shuffle_port}.log"
         
         current_shuffle_port=$((current_shuffle_port + 1))
@@ -253,7 +282,7 @@ stop_worker_on_host() {
     echo "--- Worker sur $target_host arrêté ---"
 }
 
-# ▼▼▼ NOUVELLE FONCTION : Nettoyer les répertoires d'un job ▼▼▼
+#  Nettoyer les répertoires d'un job
 clean_job_directories() {
     get_current_job_id
     echo "--- Nettoyage des répertoires du Job ID: $JOB_ID ---"
@@ -272,7 +301,6 @@ clean_job_directories() {
     
     echo "--- Nettoyage terminé ---"
 }
-# ▲▲▲
 
 
 clean_amdal_results() {
@@ -287,17 +315,25 @@ clean_all() {
     clean_job_directories
 }
 
-logs() {
+logs_master() {
     get_current_job_id
-    echo "--- Affichage des logs du Job ID: $JOB_ID (Ctrl+C pour arrêter) ---"
+    echo "--- Affichage des logs du master du Job ID: $JOB_ID (Ctrl+C pour arrêter) ---"
     trap 'kill $(jobs -p) 2>/dev/null; echo "\nArrêt du tail."; exit' INT TERM
     
     # Extraire l'IP/hostname du master pour le préfixe
     MASTER_IP=${MASTER_HOST#*@}
     
-    # ▼▼▼ CORRECTION : Échapper correctement sed dans SSH ▼▼▼
+    # Échapper correctement sed dans SSH
     echo "Démarrage du tail sur Master ($MASTER_IP)..."
     ssh $MASTER_HOST "tail -f /tmp/YBT_${JOB_ID}/logs/master.log 2>/dev/null" 2>&1 | sed "s/^/[MASTER:${MASTER_IP}] /" &
+    
+    wait
+}
+
+logs_workers() {
+    get_current_job_id
+    echo "--- Affichage des logs des workers du Job ID: $JOB_ID (Ctrl+C pour arrêter) ---"
+    trap 'kill $(jobs -p) 2>/dev/null; echo "\nArrêt du tail."; exit' INT TERM
     
     # Logs des Workers avec préfixe [WORKER:ip:port]
     current_port=$SHUFFLE_PORT_START
@@ -307,7 +343,6 @@ logs() {
         ssh $worker_host "tail -f /tmp/YBT_${JOB_ID}/logs/worker_${current_port}.log 2>/dev/null" 2>&1 | sed "s/^/[WORKER:${WORKER_IP}:${current_port}] /" &
         current_port=$((current_port + 1))
     done
-    # ▲▲▲
 
     wait
 }
@@ -328,9 +363,9 @@ logs_worker() {
         if [ "$current_port" -eq "$worker_port" ]; then
             WORKER_IP=${worker_host#*@}
             echo "--- Logs du Worker sur $worker_host (Port: $worker_port, Job ID: $JOB_ID) ---"
-            # ▼▼▼ CORRECTION : Échapper correctement sed ▼▼▼
+            # Échapper correctement sed
             ssh $worker_host "tail -f /tmp/YBT_${JOB_ID}/logs/worker_${worker_port}.log 2>/dev/null" 2>&1 | sed "s/^/[WORKER:${WORKER_IP}:${worker_port}] /"
-            # ▲▲▲
+            # 
             return
         fi
         current_port=$((current_port + 1))
@@ -369,117 +404,32 @@ show_amdal_results() {
     ssh $NFS_MACHINE "cat $AMDAL_RESULT_FILE_PATH" || echo "Aucun fichier $AMDAL_RESULT_FILE_PATH trouvé."
 }
 
-# ▼▼▼ NOUVELLE FONCTION : Test Amdahl avec pas adaptatif ▼▼▼
-lauch_amdal_analysis() {
-    local max_splits=$1
-    local max_workers=$2
-    # Déterminer le pas adaptatif
-    local STEP=$((max_workers / 10))
-    local START=5
-    if [ $STEP -lt 1 ]; then
-        STEP=1
-    fi
-    get_stored_master_nfs_server
-    clean_amdal_results
+collect_logs() {
+    get_current_job_id
+    echo "--- Collecte des logs du Job ID: $JOB_ID ---"
     
-    echo "=============================================="
-    echo "  ANALYSE AMDAHL - Cluster Distant"
-    echo "  Splits: $max_splits"
-    echo "  Workers: $START à $max_workers"
-    echo "=============================================="
+    LOCAL_LOGS_DIR="${TEST_WORKSPACE}/collected_logs_${JOB_ID}"
+    mkdir -p "$LOCAL_LOGS_DIR"
     
+    echo "  -> Collecte des logs du Master"
+    scp "$MASTER_HOST:/tmp/YBT_${JOB_ID}/logs/master.log" \
+        "$LOCAL_LOGS_DIR/master_${MASTER_HOST#*@}_log.txt" 2>/dev/null || echo "     Échec"
     
-    
-    echo "  Pas d'incrémentation : $STEP"
-    echo "  Points de mesure : $(seq $START $STEP $max_workers | wc -l)"
-    echo ""
-    
-    # Boucle de tests
-    for num_workers in $(seq $START $STEP $max_workers); do
-        echo ""
-        echo "══════════════════════════════════════════"
-        echo "  TEST $num_workers/$max_workers workers"
-        echo "  Job ID: $(date +%Y%m%d_%H%M%S)"
-        echo "══════════════════════════════════════════"
-        
-        # Récupérer la liste de workers
-        echo "  -> Récupération de $num_workers workers..."
-        NUM_WORKERS_TO_LAUNCH=$num_workers
-        get_master_and_workers_list
-        
-        # Déployer si premier test
-        if [ $num_workers -eq 1 ]; then
-            echo "  -> Déploiement du code..."
-            deploy
+    current_port=$SHUFFLE_PORT_START
+    for worker_host in "${WORKERS_TO_LAUNCH[@]}"; do
+        worker_ip=${worker_host#*@}
+        if [ "$worker_ip" == "$MASTER_HOST" ]; then
+            current_port=$((current_port + 1))
+            continue
         fi
-        
-        # Arrêter les services précédents
-        stop 2>/dev/null || true
-        sleep 3
-        
-        # Lancer le test
-        echo "  -> Démarrage du test..."
-        SPLIT_LIMIT=$max_splits
-        start
-        
-        # Attendre la fin du job
-        echo "  -> Attente de la fin du job..."
-        local timeout=3600  # 1h max par test
-        local elapsed=0
-        local last_log=0
-        
-        while true; do
-            # Vérifier si le job est terminé
-            if ssh $MASTER_HOST "grep  'RÉSUMÉ FINAL DU JOB (SUCCÈS)' /tmp/YBT_${JOB_ID}/logs/master.log 2>/dev/null"; then
-                echo "  Job terminé avec $num_workers workers"
-                break
-            fi
-            
-            sleep 10
-            elapsed=$((elapsed + 10))
-            
-            # Log de progression toutes les 10 minutes
-            if [ $((elapsed - last_log)) -ge 600 ]; then
-                echo "  Attente... ${elapsed}s écoulées ($num_workers workers)"
-                last_log=$elapsed
-            fi
-            
-            if [ $elapsed -ge $timeout ]; then
-                echo "  Timeout après ${timeout}s"
-                stop
-                break
-            fi
-        done
-        
-        # Pause entre les tests
-        echo "  -> Pause de 10s avant le prochain test..."
-        sleep 10
+        echo "  -> Collecte des logs de $worker_host (port $current_port)"
+        scp "$worker_host:/tmp/YBT_${JOB_ID}/logs/worker_${current_port}.log" \
+            "$LOCAL_LOGS_DIR/worker_${current_port}_${worker_ip}_log.txt" 2>/dev/null || echo "     Échec"
+        current_port=$((current_port + 1))
     done
-    echo ""
-    echo "══════════════════════════════════════════"
-    echo "  ANALYSE AMDAHL TERMINÉE"
-    echo "══════════════════════════════════════════"
-}
-# ▲▲▲
-
-
-
-# ▼▼▼ NOUVELLE FONCTION : Test Amdahl dataset fixe ▼▼▼
-lauch_amdal_analysis_fixed() {
-    local num_splits=$1
-    local max_workers=$2
     
-    echo "=============================================="
-    echo "  ANALYSE AMDAHL - Dataset fixe"
-    echo "  Splits: $num_splits (fixe)"
-    echo "  Workers: 5 à $max_workers"
-    echo "=============================================="
-    
-    # Utiliser la même logique que lauch_amdal_analysis
-    # mais avec num_splits constant
-    lauch_amdal_analysis $num_splits $max_workers
+    echo "--- Logs collectés dans $LOCAL_LOGS_DIR ---"
 }
-# ▲▲▲
 
 show_used_servers() {
     echo "--- Serveurs utilisés ---"
@@ -539,13 +489,6 @@ case "$1" in
         deploy
         start
         ;;
-    full-rate-limit)
-        RATE_LIMIT=1
-        get_stored_master_nfs_server
-        get_stored_workers_list
-        deploy
-        start
-        ;;
     clean-all)
         get_stored_master_nfs_server
         clean_all
@@ -559,11 +502,14 @@ case "$1" in
         get_stored_workers_list
         clean_job_directories
         ;;
-    logs)
+    logs-master)
         get_stored_master_nfs_server
-        get_stored_workers_list
-        logs
+        logs_master
         ;;
+    logs-workers)
+        get_stored_workers_list
+        logs_workers
+        ;;    
     logs-worker)
         get_stored_workers_list
         if [ -z "$2" ]; then
@@ -578,10 +524,15 @@ case "$1" in
         collect_logs
         ;;
     results)
+        if [ -z "$2" ]; then
+            echo "Usage: $0 results <display|download>"
+            exit 1
+        fi
+        mode=$2
         get_stored_master_nfs_server
-        show_amdal_results
+        show_amdal_results "$mode"
         ;;
-    collect-outputs)
+    collect-reduce-outputs)
         get_stored_master_nfs_server
         get_stored_workers_list
         collect_outputs
@@ -600,25 +551,24 @@ case "$1" in
         show_used_servers
         ;;
     *)
-        echo "Usage: $0 [deploy|start|stop|full|full-rate-limit|clean-amdal-results|clean-reduce-outputs|clean-job|logs|logs-worker|collect-logs|results|retrieve-master-nfs-server-and-workers|stop-worker-on-host|collect-outputs|show-used-servers]"
+        echo "Usage: $0 [deploy|start|stop|full|full-rate-limit|clean-amdal-results|clean-reduce-outputs|clean-job|logs|logs-worker|collect-logs|results|retrieve-master-nfs-server-and-workers|stop-worker-on-host|collect-reduce-outputs|show-used-servers]"
         echo ""
         echo "Commandes:"
         echo "  deploy                                   - Copie les fichiers Python sur le NFS"
         echo "  start <number_of_splits>                 - Démarre le master et les workers"
         echo "  stop                                     - Arrête tous les processus"
         echo "  full <number_of_splits>                  - Déploie puis démarre"
-        echo "  full-rate-limit <number_of_splits>       - Déploie puis démarre avec rate limiting"
         echo "  clean-all                                - Supprime logs, outputs et résultats Amdahl"
         echo "  clean-amdal-results                      - Supprime uniquement amdahl_results.csv"
         echo "  clean-job                                - Supprime les répertoires /tmp/YBT_* du job courant"
-        echo "  logs                                     - Affiche les logs du master en temps réel"
+        echo "  logs-master                                     - Affiche les logs du master en temps réel"
+        echo "  logs-workers                                    - Affiche les logs de tous les workers en temps réel"
         echo "  logs-worker <shuffle_port>               - Affiche les logs d'un worker spécifique"
         echo "  collect-logs                             - Récupère tous les logs du job courant"
-        echo "  results                                  - Affiche le contenu de amdahl_results.csv"
-        echo "  retrieve-master-nfs-server-and-workers <number>                - Récupère et stocke la liste des workers"
-        echo "  stop-worker-on-host <worker_host>        - Arrête le worker sur l'hôte spécifié"
-        echo "  collect-outputs                          - Récupère tous les outputs des workers"
-        echo "  launch-amdal-analysis-fixed-dataset <num_splits> <max_workers> - Lance une analyse Amdahl sur un dataset fixe"
+        echo "  results    <display|download>            - Affiche le contenu de amdahl_results.csv ou télécharge le fichier"
+        echo "  retrieve-master-nfs-server-and-workers <number-of-workers>                - Récupère et stocke la liste des workers"
+        echo "  stop-worker-on-host <worker_port>        - Arrête le worker sur l'hôte spécifié"
+        echo "  collect-reduce-outputs                          - Récupère tous les resultats de reduce des workers"
         echo "  show-used-servers                       - Affiche les serveurs master/NFS et workers utilisés"
         exit 1
         ;;
