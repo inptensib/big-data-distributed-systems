@@ -196,14 +196,13 @@ deploy() {
 }
 
 start() {
-    # ▼▼▼ GÉNÉRATION DU JOB ID ▼▼▼
+    #  GÉNÉRATION DU JOB ID 
     generate_job_id
-    # ▲▲▲
     
     echo "--- Démarrage du Master (attend $NUM_WORKERS_ACTUAL workers) ---"
     echo "    [Job ID: $JOB_ID]"
     
-    # CRÉATION DES RÉPERTOIRES SUR LE MASTER ▼▼▼
+    # CRÉATION DES RÉPERTOIRES SUR LE MASTER 
     create_job_directories "$MASTER_HOST" "Master"
     #
     
@@ -400,8 +399,20 @@ collect_outputs() {
 }
 
 show_amdal_results() {
-    echo "--- Affichage des résultats Amdahl ($AMDAL_RESULT_FILE_PATH) ---"
-    ssh $NFS_MACHINE "cat $AMDAL_RESULT_FILE_PATH" || echo "Aucun fichier $AMDAL_RESULT_FILE_PATH trouvé."
+    local mode=$1
+    if [ "$mode" == "download" ]; then
+        get_current_job_id
+        echo "--- Téléchargement des résultats Amdahl ($AMDAL_RESULT_FILE_PATH) ---"
+        LOCAL_AMDAL_RESULTS_DIR="${TEST_WORKSPACE}/amdahl_results_${JOB_ID}"
+        mkdir -p "$LOCAL_AMDAL_RESULTS_DIR"
+        scp "$NFS_MACHINE:$AMDAL_RESULT_FILE_PATH" \
+            "$LOCAL_AMDAL_RESULTS_DIR/amdahl_results.csv" 2>/dev/null || echo "Aucun fichier $AMDAL_RESULT_FILE_PATH trouvé."
+        echo "--- Fichier téléchargé dans $LOCAL_AMDAL_RESULTS_DIR/amdahl_results.csv ---"
+    elif [ "$mode" == "display" ]; then
+        echo "--- Affichage des résultats Amdahl ($AMDAL_RESULT_FILE_PATH) ---"
+        ssh $NFS_MACHINE "cat $AMDAL_RESULT_FILE_PATH" || echo "Aucun fichier $AMDAL_RESULT_FILE_PATH trouvé."
+    fi
+    
 }
 
 collect_logs() {
@@ -440,8 +451,18 @@ show_used_servers() {
     done
 }
 
+launch_amdal_analysis(){
+    #Récuppérer le fichier des résultats amdahl
+    echo "Récupération du fichier des résultats Amdahl du serveur NFS..."
+    get_stored_master_nfs_server
+    get_current_job_id
+    LOCAL_AMDAL_RESULTS_DIR="${TEST_WORKSPACE}/amdahl_results_${JOB_ID}"
+    show_amdal_results "download"
+    ./amdal_analyser.sh "$LOCAL_AMDAL_RESULTS_DIR/amdahl_results.csv"
 
-# ▼▼▼ 2. Préparation de l'Environnement ▼▼▼
+}
+
+#Préparation de l'Environnement
 prepare_environment() {
     mkdir -p "$TEST_WORKSPACE"
 }
@@ -550,6 +571,9 @@ case "$1" in
         get_stored_workers_list
         show_used_servers
         ;;
+    launch-amdal-analysis)
+        launch_amdal_analysis
+        ;;
     *)
         echo "Usage: $0 [deploy|start|stop|full|full-rate-limit|clean-amdal-results|clean-reduce-outputs|clean-job|logs|logs-worker|collect-logs|results|retrieve-master-nfs-server-and-workers|stop-worker-on-host|collect-reduce-outputs|show-used-servers]"
         echo ""
@@ -570,6 +594,7 @@ case "$1" in
         echo "  stop-worker-on-host <worker_port>        - Arrête le worker sur l'hôte spécifié"
         echo "  collect-reduce-outputs                          - Récupère tous les resultats de reduce des workers"
         echo "  show-used-servers                       - Affiche les serveurs master/NFS et workers utilisés"
+        echo "  launch-amdal-analysis                    - Récupère le fichier amdahl_results.csv et lance l'analyse"
         exit 1
         ;;
 esac

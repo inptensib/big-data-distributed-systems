@@ -46,6 +46,8 @@ Le fichier `.env` contient les variables essentielles pour le déploiement.
 cd tests-distant;
 dos2unix *;
 chmod +x *.sh;
+chmod +x ../map-reduce/*.py;
+chmod +x *.py;
 ```
 Le script `deploy.sh` est le point d'entrée unique.
 
@@ -122,6 +124,12 @@ Arrête les processus Python sur toutes les machines distantes (A utiliser surto
 
 Lance une série de tests automatisés avec un nombre variable de workers pour générer des courbes de speedup.
 
+```bash
+# Cette commande télécharge les résultats et lance l'analyse
+./deploy.sh launch-amdal-analysis
+
+```
+ou directement via le script :
 ```bash
 ./amdal_analyser.sh <csv_output_file>
 # Exemple : ./amdal_analyser.sh analysis_results.csv
