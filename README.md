@@ -27,12 +27,12 @@ BIGDATA/
 ## **Tests**
 
 ### **Test local**
-Cliquez [Ici](tests-local/README.md) 
+Cliquez [Ici](tests-local/TEST-LOCAL-README.md) 
  
 ---
 
 ### **Cluster distant (Machine de l'école)**
-Cliquez [Ici](tests-distant/README.md) 
+Cliquez [Ici](TESTS-DISTANT-README.md) 
 
 ---
 

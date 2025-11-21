@@ -35,6 +35,12 @@ Le fichier `.env` définit les paramètres d'exécution. Voici les principales v
 - `SPLIT_LIMIT` : Nombre maximum de splits à traiter (laisser vide pour tout traiter). Utile pour des tests rapides.
 
 ## Utilisation
+```bash
+cd tests-local;
+dos2unix *;
+chmod +x *.sh;
+chmod +x ../map-reduce/*.py;
+```
 
 Le script `deploy_local.sh` s'utilise avec différentes commandes :
 

@@ -54,6 +54,7 @@ Le script `deploy.sh` est le point d'entrée unique.
 ### 0. Mise à jour du fichier .env
 Avant de lancer des commandes, assurez-vous que le fichier `.env` est correctement configuré avec vos paramètres SSH, chemins, et ports.
 /!\ Surtout, vérifiez que `SSH_USER` correspond à votre user SSH.
+/!\ Assurez-vous que `REMOTE_PATH` est un chemin où vous avez les droits en écriture sur les machines distantes.
 
 ### 1. Récupération des machines
 
