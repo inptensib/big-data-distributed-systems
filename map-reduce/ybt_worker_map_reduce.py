@@ -381,9 +381,8 @@ async def store_intermediate_data_batch(data_batch):
         async with data_lock:
             # data_batch est une liste de listes: [[k, v], [k, v]]
             for key, value in data_batch:
-                # ▼▼▼ MODIFICATION (Optimisation Combiner) ▼▼▼
+                # MODIFICATION (Optimisation Combiner)
                 intermediate_data[key] += value  # ( .append(value) -> += value )
-                # ▲▲▲ FIN MODIFICATION ▲▲▲
     except Exception as e:
         logging.warning(f"[SHUFFLE-STORE] Erreur stockage RAM batch: {e}")
 
@@ -437,7 +436,6 @@ async def handle_shuffle_connection(reader, writer):
                             logging.error(
                                 f"[SHUFFLE-WRITE] Échec écriture run {run_filename}: {e}"
                             )
-                        # ▲▲▲ FIN MODIFICATION (Logique DISK optimisée) ▲▲▲
                 else:
                     # C'est un TUPLE UNIQUE (rétrocompatibilité)
                     try:
